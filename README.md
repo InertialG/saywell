@@ -1,55 +1,71 @@
-# fix-english
+# saywell
 
-Tools for a non-native speaker writing English to AI coding agents:
+Say it well: write English to AI coding agents with help, and learn from your own mistakes.
 
-- `fix-english`: reads a draft on stdin and prints it with the grammar and spelling fixed and any Chinese translated. Use it as an editor filter.
-- `fix-english-popup`: a compact dialog in the style of a Windows password prompt (the screen dims behind it), opened with a hotkey, for writing a message with help. It shows fixed and improved versions, a Chinese back-translation to check the meaning, learning notes, and answers to follow-up questions. Then it pastes the chosen version where the cursor was.
+- `saywell`: reads a draft on stdin and prints it with the grammar fixed and any Chinese translated. It works as an editor filter, such as nvim `<leader>cg`.
+- `saywell-popup`: a Raycast-style panel on a hotkey. Type a draft, check it, pick a version and paste it where your cursor was.
+- `saywell --learn`: works offline, away from your writing. It reads everything you wrote (drafts and follow-up questions) and extracts 知识点 into a personal knowledge base. Repeated mistakes are counted.
 
 ## Setup
 
 ```sh
-ln -s ~/Work/fix-english/fix-english ~/.local/bin/fix-english
-ln -s ~/Work/fix-english/fix-english-popup ~/.local/bin/fix-english-popup
-mkdir -p ~/.config/fix-english && cp config.example.toml ~/.config/fix-english/config.toml
+ln -s ~/Work/saywell/saywell ~/.local/bin/saywell
+ln -s ~/Work/saywell/saywell-popup ~/.local/bin/saywell-popup
+mkdir -p ~/.config/saywell && cp config.example.toml ~/.config/saywell/config.toml
 ```
 
 The default provider is `claude`: it runs `claude -p --model haiku` on your Claude subscription. The config also lists a local llama.cpp server and several free API providers.
 
-The popup needs GTK4 and libadwaita (PyGObject), `wl-copy`, `wtype` and Hyprland. Its layout is modelled on Raycast: the draft as a top bar, versions on the left (changed words highlighted; hover a version to list its changes), 知识点 cards and a follow-up chat on the right, and a footer of clickable key hints. Add this to `~/.config/hypr/bindings.lua`:
+The popup needs GTK4 and libadwaita (PyGObject), `wl-copy`, `wtype` and Hyprland. Add this to `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + ALT + E", "Fix English", os.getenv("HOME") .. "/.local/bin/fix-english-popup")
+o.bind("SUPER + ALT + E", "Saywell", os.getenv("HOME") .. "/.local/bin/saywell-popup")
 ```
 
 Add this to `~/.config/hypr/hyprland.lua`:
 
 ```lua
-o.window("^uno\\.guan810\\.FixEnglish$", {
+o.window("^uno\\.guan810\\.Saywell$", {
   float = true, center = true, size = { 1040, 660 }, pin = true,
   dim_around = true, rounding = 12, border_size = 0, tag = "-default-opacity",
 })
 ```
 
+To learn every hour, use the systemd user timer:
+
+```sh
+ln -s ~/Work/saywell/contrib/saywell-learn.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now saywell-learn.timer
+```
+
 ## CLI
 
 ```sh
-echo "why the test is fail" | fix-english             # -> Why is the test failing?
-fix-english --json < draft.txt                        # fixed, improved, 含义 check, notes
-fix-english --json --stream < draft.txt               # one JSON line per finished section
-fix-english --json < d.txt | fix-english --ask "why not ensure?"
-fix-english --bench | --list | --models -p NAME
+echo "why the test is fail" | saywell           # -> Why is the test failing?
+saywell --json < draft.txt                      # fixed, improved, 含义 back-translations, meaning flags
+saywell --json --stream < draft.txt             # progress lines while the model writes (for the popup)
+saywell --json < d.txt | saywell --ask "why not ensure?"
+saywell --learn                                 # extract 知识点 from messages logged since the last run
+saywell --notes 20                              # your 20 most frequent 知识点
+saywell --bench | --list | --models -p NAME
 ```
 
-Every change is logged to `~/.local/share/fix-english/log.jsonl`.
+Data lives in `~/.local/share/saywell/`:
+- `log.jsonl`: every fix, check and follow-up question.
+- `notes.jsonl`: the 知识点, one per line, merged by `from → to`, with a count and example sources.
+- `learn-state.json`: how far `--learn` has read.
 
-## Popup keys
+## The popup
+
+- **Top bar:** your draft.
+- **Left:** the fixed, improved and original versions, with changed words highlighted. Hover over a version to list its changes. Each version shows a Chinese back-translation (含义) so you can check the meaning, followed by a note on anything whose meaning may have changed.
+- **Right:** step-by-step progress while checking, then a chat for follow-up questions.
 
 | Key | Action |
 |---|---|
-| Ctrl+Enter | analyze the draft |
+| Ctrl+Enter | check the draft |
 | Alt+1 / 2 / 3, or click a version | pick fixed / improved / my draft |
-| Double-click a version | paste it |
-| Ctrl+Shift+Enter | paste the picked version into the previous window |
+| Ctrl+Shift+Enter, or double-click a version | paste the picked version into the previous window |
 | Enter in the follow-up box | ask a question about the English |
 | Esc | close without pasting |
 

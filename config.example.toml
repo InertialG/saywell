@@ -1,7 +1,7 @@
-# fix-english providers. Every provider speaks the OpenAI chat-completions API.
-# Pick one with: default = "...", $FIX_ENGLISH_PROVIDER, or `fix-english -p NAME`.
-# Compare them with: fix-english --bench
-# See a provider's models with: fix-english --models -p NAME
+# saywell providers. Every provider speaks the OpenAI chat-completions API.
+# Pick one with: default = "...", $FIX_ENGLISH_PROVIDER, or `saywell -p NAME`.
+# Compare them with: saywell --bench
+# See a provider's models with: saywell --models -p NAME
 #
 # Model names change often; if one fails, run --models and update it here.
 # `extra` is merged into the request body (e.g. reasoning_effort, max_tokens).
@@ -36,7 +36,7 @@ model = "gemini-2.5-flash-lite"
 api_key_env = "GEMINI_API_KEY"
 
 # OpenRouter free models: 20 req/min; 50 req/day (1000/day after $10 credits bought).
-# List current free models: fix-english --models -p openrouter | grep :free
+# List current free models: saywell --models -p openrouter | grep :free
 [providers.openrouter]
 base_url = "https://openrouter.ai/api/v1"
 model = "google/gemma-4-26b-a4b-it:free"

@@ -1,0 +1,8 @@
+[Unit]
+Description=saywell: extract 知识点 from recently logged messages
+
+[Service]
+Type=oneshot
+# claude is installed by mise, which a systemd user service does not put on PATH.
+Environment=PATH=%h/.local/bin:%h/.local/share/mise/installs/claude/latest:/usr/local/bin:/usr/bin
+ExecStart=%h/.local/bin/saywell --learn

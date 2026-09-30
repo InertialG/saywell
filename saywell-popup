@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""fix-english-popup: a Raycast-style panel for writing English with help, bound to a Hyprland hotkey.
+"""saywell-popup: a Raycast-style panel for writing English with help, bound to a Hyprland hotkey.
 
-Type a draft (mixing Chinese is fine), press Ctrl+Enter to analyze it with `fix-english --json`,
+Type a draft (mixing Chinese is fine), press Ctrl+Enter to analyze it with `saywell --json`,
 pick a version, and press Ctrl+Shift+Enter: the window closes and the text is pasted where the
 cursor was in the window you came from.
 
@@ -30,15 +30,15 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
-APP_ID = "uno.guan810.FixEnglish"
+APP_ID = "uno.guan810.Saywell"
 # Terminals paste with Ctrl+Shift+V; everything else with Ctrl+V.
 TERMINALS = re.compile(r"ghostty|foot|alacritty|kitty|wezterm|konsole|terminal", re.I)
-# Prefer the fix-english next to this script, so the repo copy runs its own backend.
+# Prefer the saywell next to this script, so the repo copy runs its own backend.
 HERE = os.path.dirname(os.path.realpath(__file__))
-BACKEND = os.path.join(HERE, "fix-english") if os.path.exists(os.path.join(HERE, "fix-english")) \
-    else shutil.which("fix-english") or "fix-english"
+BACKEND = os.path.join(HERE, "saywell") if os.path.exists(os.path.join(HERE, "saywell")) \
+    else shutil.which("saywell") or "saywell"
 
-# A Raycast-style panel: the draft as a top bar, versions on the left, notes and a follow-up chat on
+# A Raycast-style panel: the draft as a top bar, versions on the left, progress and a follow-up chat on
 # the right, key hints in a footer. Hyprland dims the rest of the screen (see README).
 CSS = """
 window.popup { background-color: rgba(26, 26, 30, 0.96); color: #ececf1; }
@@ -62,6 +62,12 @@ list.versions row:focus-visible { outline: 1px solid alpha(@accent_bg_color, 0.6
 .ok-line { color: #8ff0a4; }
 .note-card { border-radius: 10px; padding: 10px 14px; background-color: rgba(255, 255, 255, 0.04); }
 .note-title { font-weight: 700; color: #f4f4f6; }
+progressbar trough { min-height: 6px; border-radius: 3px; background-color: rgba(255, 255, 255, 0.08); }
+progressbar progress { min-height: 6px; border-radius: 3px; background-color: @accent_bg_color; }
+.step { font-size: 14px; }
+.step-done { color: #8ff0a4; }
+.step-active { color: #f4f4f6; font-weight: 600; }
+.step-todo { color: #6e6e78; }
 .bubble-me { border-radius: 14px 14px 4px 14px; padding: 7px 12px; background-color: @accent_bg_color;
              color: white; }
 .answer { padding: 2px 2px; }
@@ -155,7 +161,7 @@ class Popup(Adw.ApplicationWindow):
     NAMES = {"fixed": "Fixed", "improved": "Improved", "mine": "My draft"}
 
     def __init__(self, app):
-        super().__init__(application=app, title="Fix English", default_width=1040, default_height=660)
+        super().__init__(application=app, title="Saywell", default_width=1040, default_height=660)
         self.add_css_class("popup")
         self.analysis = None        # latest --json result
         self.history = []           # follow-up questions and answers
@@ -175,14 +181,11 @@ class Popup(Adw.ApplicationWindow):
                                                      propagate_natural_height=True, hexpand=True,
                                                      hscrollbar_policy=Gtk.PolicyType.NEVER))
         draft.add_overlay(placeholder)
-        self.spinner = Adw.Spinner(visible=False)
         top = Gtk.Box(spacing=12)
         top.add_css_class("topbar")
         top.append(draft)
         check = kbd("⌃ ↵", "Check", self.analyze)
         check.set_valign(Gtk.Align.START)
-        self.spinner.set_valign(Gtk.Align.START)
-        top.append(self.spinner)
         top.append(check)
 
         # Left: versions as selectable cards, then the meaning check.
@@ -200,11 +203,23 @@ class Popup(Adw.ApplicationWindow):
         left.append(self.meaning)
         left_scroll = Gtk.ScrolledWindow(child=left, hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
 
-        # Right: 知识点 cards, then the follow-up chat with its entry pinned at the bottom.
-        self.notes = vbox(8)
+        # Right: progress while checking, then the follow-up chat with its entry pinned at the bottom.
+        # 知识点 are not made here: `saywell --learn` extracts them offline from the log.
+        self.progress = vbox(10)
+        self.progress.append(label("CHECKING", "eyebrow"))
+        self.bar = Gtk.ProgressBar()
+        self.progress.append(self.bar)
+        self.steps = vbox(6)
+        self.progress.append(self.steps)
+        self.progress.set_visible(False)
         self.chat = vbox(10)
+        self.chat_intro = vbox(4)
+        self.chat_intro.append(label("追问", "eyebrow"))
+        self.chat_intro.append(label("Ask anything about this English. Your questions are English practice "
+                                     "too: they go into your 知识点 when saywell learns offline.", "dim"))
         right = vbox(14, "pane")
-        right.append(self.notes)
+        right.append(self.progress)
+        right.append(self.chat_intro)
         right.append(self.chat)
         self.right_scroll = Gtk.ScrolledWindow(child=right, hscrollbar_policy=Gtk.PolicyType.NEVER,
                                                vexpand=True)
@@ -273,9 +288,55 @@ class Popup(Adw.ApplicationWindow):
         buf = self.input.get_buffer()
         return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False).strip()
 
+    # Steps shown while checking, and the model sections that belong to each.
+    STEPS = (("Fixing grammar", ("fixed",)), ("Improving wording", ("improved", "why")),
+             ("Translating back · 含义", ("fixed_zh", "improved_zh")), ("Checking meaning", ("flag",)))
+
     def set_status(self, text="", busy=False):
         self.status.set_text(text)
-        self.spinner.set_visible(busy)
+
+    def start_progress(self):
+        self.step = 0
+        self.fraction = 0.0
+        self.progress.set_visible(True)
+        self.chat_intro.set_visible(False)
+        self.show_steps()
+        if not getattr(self, "ticker", None):
+            self.ticker = GLib.timeout_add(80, self.tick)
+
+    def set_stage(self, stage):
+        for i, (_, stages) in enumerate(self.STEPS):
+            if stage in stages and i > self.step:
+                self.step = i
+                self.show_steps()
+
+    def show_steps(self):
+        clear(self.steps)
+        for i, (name, _) in enumerate(self.STEPS):
+            mark, css = (("✓", "step-done") if i < self.step else ("●", "step-active") if i == self.step
+                         else ("○", "step-todo"))
+            self.steps.append(label(f"{mark}  {name}", f"step {css}", wrap=False))
+
+    def tick(self):
+        # Ease toward the end of the current step; the model gives no finer progress than that.
+        target = (self.step + 0.9) / len(self.STEPS)
+        self.fraction += (target - self.fraction) * 0.04
+        self.bar.set_fraction(self.fraction)
+        return True
+
+    def stop_progress(self, ok):
+        if getattr(self, "ticker", None):
+            GLib.source_remove(self.ticker)
+            self.ticker = None
+        if ok:
+            self.step = len(self.STEPS)
+            self.bar.set_fraction(1.0)
+            self.show_steps()
+            GLib.timeout_add(600, lambda: (self.progress.set_visible(False),
+                                           self.chat_intro.set_visible(True)) and False)
+        else:
+            self.progress.set_visible(False)
+            self.chat_intro.set_visible(True)
 
     def show_results(self, shown):
         self.left_empty.set_visible(not shown)
@@ -295,8 +356,11 @@ class Popup(Adw.ApplicationWindow):
         self.analysis = None
         self.history = []
         clear(self.chat)
+        self.chat_intro.set_visible(True)
         self.started = time.monotonic()
-        self.set_status("Checking…", busy=True)
+        self.set_status("Checking…")
+        self.left_empty.set_text("Versions appear here as soon as they are ready.")
+        self.start_progress()
         proc = Gio.Subprocess.new([BACKEND, "--json", "--stream"],
                                   Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
                                   | Gio.SubprocessFlags.STDERR_PIPE)
@@ -316,10 +380,14 @@ class Popup(Adw.ApplicationWindow):
             proc.wait_async(None, self.on_exit, None)
             return
         try:
-            self.analysis = json.loads(line)
-            self.render()
+            obj = json.loads(line)
         except json.JSONDecodeError:
-            pass
+            obj = None
+        if obj and "stage" in obj:
+            self.set_stage(obj["stage"])
+        elif obj:
+            self.analysis = obj
+            self.render()
         stream.read_line_async(GLib.PRIORITY_DEFAULT, None, self.on_line, data)
 
     def on_exit(self, proc, result, _):
@@ -329,10 +397,12 @@ class Popup(Adw.ApplicationWindow):
         self.proc = None
         if proc.get_exit_status() == 0 and self.analysis and self.analysis.get("done"):
             self.set_status(f"Checked in {self.analysis.get('ms', 0) / 1000:.1f} s")
+            self.stop_progress(True)
             self.render()
             return
+        self.stop_progress(False)
         err = proc.get_stderr_pipe().read_bytes(4096, None).get_data().decode(errors="replace").strip()
-        err = re.sub(r"^fix-english \[\w+\]: ", "", err) or "the check failed"
+        err = re.sub(r"^saywell \[\w+\]: ", "", err) or "the check failed"
         self.set_status("Check failed")
         self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(err[:120]), timeout=6))
 
@@ -342,11 +412,10 @@ class Popup(Adw.ApplicationWindow):
         a = self.analysis
         done = a.get("done")
         if not done:
-            self.set_status(f"Checking… {time.monotonic() - self.started:.0f} s", busy=True)
+            self.set_status(f"Checking… {time.monotonic() - self.started:.0f} s")
         self.show_results(True)
         self.render_versions(a)
         self.render_meaning(a, done)
-        self.render_notes(a)
 
     def render_versions(self, a):
         self._rendering = True
@@ -396,20 +465,6 @@ class Popup(Adw.ApplicationWindow):
             self.meaning.append(label("✓  Meaning unchanged — still compare the 含义 lines with what you meant",
                                       "ok-line"))
 
-    def render_notes(self, a):
-        clear(self.notes)
-        notes = a.get("notes") or []
-        self.notes.append(label("知识点", "eyebrow"))
-        if not notes:
-            self.notes.append(label("Notes on words and grammar appear here." if not a.get("done")
-                                    else "Nothing to learn here — the draft was already fine.", "dim"))
-        for n in notes:
-            card = vbox(4, "note-card")
-            card.append(label(n["point"], "note-title", selectable=True))
-            if n.get("detail"):
-                card.append(label(n["detail"], "muted", selectable=True))
-            self.notes.append(card)
-
     def on_row_selected(self, _list, row):
         if row is not None and not getattr(self, "_rendering", False):
             self.choice = row.key
@@ -432,8 +487,6 @@ class Popup(Adw.ApplicationWindow):
             return
         entry.set_text("")
         context = {**self.analysis, "history": [{"q": qa["q"], "a": qa["a"]} for qa in self.history if qa["a"]]}
-        if not self.history:
-            self.chat.append(label("追问", "eyebrow"))
         bubble = label(question, "bubble-me", selectable=True)
         bubble.set_halign(Gtk.Align.END)
         bubble.set_max_width_chars(40)

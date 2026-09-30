@@ -1,0 +1,10 @@
+[Unit]
+Description=Run saywell --learn every hour
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
