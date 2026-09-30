@@ -47,6 +47,7 @@ saywell --json --stream < draft.txt             # progress lines while the model
 saywell --json < d.txt | saywell --ask "why not ensure?"
 saywell --learn                                 # extract 知识点 from messages logged since the last run
 saywell --notes 20                              # your 20 most frequent 知识点
+saywell --usage 30                              # tokens and API-equivalent cost, last 30 days
 saywell --bench | --list | --models -p NAME
 ```
 
@@ -54,6 +55,7 @@ Data lives in `~/.local/share/saywell/`:
 - `log.jsonl`: every fix, check and follow-up question.
 - `notes.jsonl`: the 知识点, one per line, merged by `from → to`, with a count and example sources.
 - `learn-state.json`: how far `--learn` has read.
+- `usage.jsonl`: tokens, time and cost of every model call. `saywell --usage [DAYS]` sums them.
 
 ## The popup
 

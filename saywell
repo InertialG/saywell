@@ -14,9 +14,10 @@ Usage:
 
   saywell --learn            # extract 知识点 from everything logged since the last run
   saywell --notes [N]        # show the N most frequent 知识点
+  saywell --usage [DAYS]     # tokens and API-equivalent cost per day, kind and model
 
 Config: ~/.config/saywell/config.toml
-Data:   ~/.local/share/saywell/ (log.jsonl, notes.jsonl)
+Data:   ~/.local/share/saywell/ (log.jsonl, notes.jsonl, usage.jsonl)
 """
 
 import argparse
@@ -37,6 +38,7 @@ DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"
 LOG_PATH = DATA_DIR / "log.jsonl"          # every fix, check and follow-up question
 NOTES_PATH = DATA_DIR / "notes.jsonl"      # 知识点 extracted by --learn, one per line, merged by key
 LEARN_STATE = DATA_DIR / "learn-state.json"
+USAGE_PATH = DATA_DIR / "usage.jsonl"      # tokens and cost of every model call
 
 SYSTEM_PROMPT = """You are an English proofreader for a non-native speaker who writes messages to AI coding agents.
 
@@ -127,7 +129,7 @@ def resolve_provider(config, name):
     providers = config.get("providers", {})
     if name not in providers:
         sys.exit(f"saywell: unknown provider {name!r}. Known: {', '.join(providers)}")
-    return name, providers[name]
+    return name, {**providers[name], "name": name}
 
 
 def api_key(provider):
@@ -154,12 +156,15 @@ def request(provider, path, body=None, timeout=None):
 
 def claude_cli(provider, system, prompt, on_text=None):
     """Run a one-shot, tool-less `claude -p`; it logs in with the Claude subscription.
-    With on_text, stream the reply and call on_text(reply_so_far) as text arrives."""
+    With on_text, stream the reply and call on_text(reply_so_far) as text arrives.
+    Returns (reply, result event); the result event carries usage and total_cost_usd."""
     cmd = ["claude", "-p", "--model", provider["model"], "--system-prompt", system,
            "--tools", "", "--strict-mcp-config", "--disable-slash-commands",
            "--no-session-persistence", "--setting-sources", ""]
     if on_text:
         cmd += ["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
+    else:
+        cmd += ["--output-format", "json"]
     env = {**os.environ, "MAX_THINKING_TOKENS": "0", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
     env.pop("ANTHROPIC_API_KEY", None)  # would bill the API instead of the subscription
     # Run from an empty dir so no project CLAUDE.md is pulled into the prompt.
@@ -174,9 +179,14 @@ def claude_cli(provider, system, prompt, on_text=None):
             raise RuntimeError("`claude` not found in PATH") from None
         except subprocess.TimeoutExpired:
             raise RuntimeError("claude timed out") from None
-        if res.returncode != 0:
-            raise RuntimeError((res.stderr or res.stdout).strip()[:300] or f"claude exited {res.returncode}")
-        return res.stdout
+        try:
+            result = json.loads(res.stdout)
+        except json.JSONDecodeError:
+            result = {}
+        if res.returncode != 0 or result.get("is_error"):
+            error = str(result.get("result") or result.get("subtype") or "") or res.stderr or res.stdout
+            raise RuntimeError(error.strip()[:300] or f"claude exited {res.returncode}")
+        return result.get("result", ""), result
 
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -185,7 +195,7 @@ def claude_cli(provider, system, prompt, on_text=None):
         raise RuntimeError("`claude` not found in PATH") from None
     timer = threading.Timer(timeout, proc.kill)
     timer.start()
-    reply, error = "", ""
+    reply, error, result = "", "", {}
     try:
         proc.stdin.write(prompt)
         proc.stdin.close()
@@ -199,8 +209,10 @@ def claude_cli(provider, system, prompt, on_text=None):
                 if delta.get("type") == "text_delta":
                     reply += delta["text"]
                     on_text(reply)
-            elif event.get("type") == "result" and event.get("is_error"):
-                error = str(event.get("result") or event.get("subtype"))
+            elif event.get("type") == "result":
+                result = event
+                if event.get("is_error"):
+                    error = str(event.get("result") or event.get("subtype"))
         proc.wait()
     finally:
         timer.cancel()
@@ -208,14 +220,20 @@ def claude_cli(provider, system, prompt, on_text=None):
         if not timer.is_alive() and proc.returncode == -9:
             raise RuntimeError("claude timed out")
         raise RuntimeError((error or proc.stderr.read()).strip()[:300] or f"claude exited {proc.returncode}")
-    return reply
+    return reply, result
 
 
-def complete(provider, system, user, on_text=None):
-    """One system + user turn on any provider; returns the raw reply text.
+def complete(provider, system, user, on_text=None, kind=None):
+    """One system + user turn on any provider; returns the raw reply text and logs its usage.
     on_text is only called by providers that stream (claude-cli)."""
+    start = time.monotonic()
     if provider.get("type") == "claude-cli":
-        return claude_cli(provider, system, user, on_text)
+        reply, result = claude_cli(provider, system, user, on_text)
+        u = result.get("usage", {})
+        log_usage(provider, kind, start, u.get("input_tokens"), u.get("output_tokens"),
+                  u.get("cache_read_input_tokens"), u.get("cache_creation_input_tokens"),
+                  result.get("total_cost_usd"), list(result.get("modelUsage", {})))
+        return reply
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     body = {"model": provider["model"], "messages": messages, "temperature": 0}
     body.update(provider.get("extra", {}))
@@ -226,12 +244,26 @@ def complete(provider, system, user, on_text=None):
             raise
         time.sleep(2)  # free tiers often return short-lived 429s
         resp = request(provider, "/chat/completions", body)
+    u = resp.get("usage") or {}
+    log_usage(provider, kind, start, u.get("prompt_tokens"), u.get("completion_tokens"),
+              (u.get("prompt_tokens_details") or {}).get("cached_tokens"), None, u.get("cost"),
+              [resp["model"]] if resp.get("model") else [])
     return resp["choices"][0]["message"].get("content") or ""
 
 
-def fix(provider, text):
+def log_usage(provider, kind, start, tokens_in, tokens_out, cache_read, cache_write, cost, models):
+    """cost_usd: claude-cli reports what the call would cost at API list prices (the subscription
+    pays instead); OpenRouter reports its real charge; other providers report none."""
+    entry = {"ts": now(), "provider": provider.get("name"), "model": provider["model"],
+             "models": models, "kind": kind, "ms": round((time.monotonic() - start) * 1000),
+             "in": tokens_in, "out": tokens_out, "cache_read": cache_read, "cache_write": cache_write,
+             "cost_usd": cost}
+    append_jsonl(USAGE_PATH, {k: v for k, v in entry.items() if v not in (None, [])})
+
+
+def fix(provider, text, kind="fix"):
     user = f"Proofread this draft. Output only the corrected draft.\n<text>\n{text}\n</text>"
-    return clean(complete(provider, SYSTEM_PROMPT, user))
+    return clean(complete(provider, SYSTEM_PROMPT, user, kind=kind))
 
 
 def parse_analysis(out):
@@ -271,7 +303,8 @@ def analyze(provider, text, on_partial=None, on_stage=None):
             if data != last:
                 last = data
                 on_partial(data)
-    out = complete(provider, ANALYZE_PROMPT, user, on_text if on_partial or on_stage else None)
+    out = complete(provider, ANALYZE_PROMPT, user, on_text if on_partial or on_stage else None,
+                   kind="analyze")
     data = parse_analysis(out)
     if not data["fixed"]:
         raise RuntimeError(f"reply has no <fixed> section: {out.strip()[:200]}")
@@ -286,7 +319,7 @@ def ask(provider, context, question):
     for qa in context.get("history", []):
         parts.append(f"Earlier question: {qa['q']}\nEarlier answer: {qa['a']}")
     parts.append(f"Question: {question}")
-    reply = complete(provider, ASK_PROMPT, "\n\n".join(parts))
+    reply = complete(provider, ASK_PROMPT, "\n\n".join(parts), kind="ask")
     return re.sub(r"<think>.*?</think>", "", reply, flags=re.S).strip()
 
 
@@ -393,7 +426,8 @@ def extract_notes(provider, batch):
         parts.append(f'<msg id="{i}">\n{src["text"]}\n</msg>')
         if src["fixed"]:
             parts.append(f'<fixed id="{i}">\n{src["fixed"]}\n</fixed>')
-    out = complete(provider, LEARN_PROMPT, "Extract the learning points.\n\n" + "\n".join(parts))
+    out = complete(provider, LEARN_PROMPT, "Extract the learning points.\n\n" + "\n".join(parts),
+                   kind="learn")
     notes = []
     for block in re.findall(r"<note>(.*?)</note>", out, flags=re.S):
         get = lambda k: (re.findall(rf"<{k}>(.*?)</{k}>", block, flags=re.S) or [""])[0].strip()
@@ -495,6 +529,32 @@ def cmd_notes(limit):
             print(f"     e.g. {n['example']}")
 
 
+def cmd_usage(days):
+    """Totals per day, then per kind and model, over the last `days` days."""
+    if not USAGE_PATH.exists():
+        print("no usage logged yet")
+        return
+    since = time.strftime("%Y-%m-%d", time.localtime(time.time() - (days - 1) * 86400))
+    entries = [e for e in map(json.loads, USAGE_PATH.read_text().splitlines()) if e["ts"][:10] >= since]
+    def table(title, key):
+        groups = {}
+        for e in entries:
+            g = groups.setdefault(key(e), [0, 0, 0, 0, 0.0])
+            g[0] += 1
+            g[1] += e.get("in", 0) + e.get("cache_read", 0) + e.get("cache_write", 0)
+            g[2] += e.get("out", 0)
+            g[3] += e.get("ms", 0)
+            g[4] += e.get("cost_usd", 0)
+        print(f"{title:<24} {'calls':>6} {'in tok':>9} {'out tok':>8} {'avg s':>6} {'cost $':>8}")
+        for k, (n, tin, tout, ms, cost) in sorted(groups.items()):
+            print(f"{k:<24} {n:>6} {tin:>9,} {tout:>8,} {ms / n / 1000:>6.1f} {cost:>8.4f}")
+        print()
+    table("day", lambda e: e["ts"][:10])
+    table("kind", lambda e: e.get("kind") or "?")
+    table("provider/model", lambda e: f"{e.get('provider')}/{e['model']}")
+    print("cost $ for claude-cli is the API list-price equivalent; the subscription pays, not you.")
+
+
 def cmd_bench(config, only):
     names = [only] if only else list(config.get("providers", {}))
     for name in names:
@@ -506,7 +566,7 @@ def cmd_bench(config, only):
         for sample in SAMPLES:
             start = time.monotonic()
             try:
-                out = fix(provider, sample)
+                out = fix(provider, sample, kind="bench")
             except (RuntimeError, KeyError, IndexError) as e:
                 print(f"   error: {e}")
                 break
@@ -546,6 +606,8 @@ def main():
     ap.add_argument("--learn", action="store_true", help="extract 知识点 from messages logged since the last run")
     ap.add_argument("--batch", type=int, default=12, help="with --learn: messages per model call")
     ap.add_argument("--notes", nargs="?", type=int, const=30, metavar="N", help="show the N most frequent 知识点")
+    ap.add_argument("--usage", nargs="?", type=int, const=7, metavar="DAYS",
+                    help="show tokens and cost of model calls over the last DAYS days")
     ap.add_argument("--ask", metavar="QUESTION", help="answer a question about the --json analysis read from stdin")
     args = ap.parse_args()
     config = load_config()
@@ -559,6 +621,8 @@ def main():
         cmd_learn(config, args.provider, args.batch)
     elif args.notes is not None:
         cmd_notes(args.notes)
+    elif args.usage is not None:
+        cmd_usage(args.usage)
     elif args.json:
         cmd_json(config, args.provider, args.stream)
     elif args.ask:
