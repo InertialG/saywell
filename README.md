@@ -58,14 +58,15 @@ Data lives in `~/.local/share/saywell/`:
 ## The popup
 
 - **Top bar:** your draft.
-- **Left:** the fixed, improved and original versions, with changed words highlighted. Hover over a version to list its changes. Each version shows a Chinese back-translation (含义) so you can check the meaning, followed by a note on anything whose meaning may have changed.
-- **Right:** step-by-step progress while checking, then a chat for follow-up questions.
+- **Left:** the fixed, improved and original versions, with changed words highlighted. Hover over a version to list its changes. Each version shows a Chinese back-translation (含义) so you can check the meaning. Double-click a version, or press Alt+Enter, to copy it into the draft and keep writing.
+- **Right:** step-by-step progress while checking. Then comes the meaning check: real meaning changes are warned about, tone-only changes are marked 语气, and pure grammar fixes are hidden. Below it is a chat for follow-up questions.
 
 | Key | Action |
 |---|---|
 | Ctrl+Enter | check the draft |
 | Alt+1 / 2 / 3, or click a version | pick fixed / improved / my draft |
-| Ctrl+Shift+Enter, or double-click a version | paste the picked version into the previous window |
+| Alt+Enter, or double-click a version | copy that version into the draft to keep writing |
+| Ctrl+Shift+Enter, or click Insert | paste the picked version into the previous window |
 | Enter in the follow-up box | ask a question about the English |
 | Esc | close without pasting |
 

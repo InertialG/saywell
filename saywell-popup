@@ -8,6 +8,7 @@ cursor was in the window you came from.
 Keys:
   Ctrl+Enter        analyze the draft (again)
   Alt+1 / 2 / 3     pick fixed / improved / my draft
+  Alt+Enter         copy the picked version into the draft to keep writing (also: double-click it)
   Ctrl+Shift+Enter  insert the picked version into the previous window
   Enter (Ask box)   ask a follow-up question about the English
   Esc               close without inserting
@@ -192,15 +193,13 @@ class Popup(Adw.ApplicationWindow):
         self.versions = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.versions.add_css_class("versions")
         self.versions.connect("row-selected", self.on_row_selected)
-        self.versions.connect("row-activated", lambda *_: self.insert())
-        self.meaning = vbox(6)
+        self.versions.connect("row-activated", lambda _l, row: self.use_as_draft(row.key))
         self.left_empty = label("Press ⌃↵ to check your draft.\nVersions appear here.", "dim", xalign=0.5)
         self.left_empty.set_justify(Gtk.Justification.CENTER)
         self.left_empty.set_vexpand(True)
         left = vbox(10, "pane")
         left.append(self.left_empty)
         left.append(self.versions)
-        left.append(self.meaning)
         left_scroll = Gtk.ScrolledWindow(child=left, hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
 
         # Right: progress while checking, then the follow-up chat with its entry pinned at the bottom.
@@ -215,10 +214,12 @@ class Popup(Adw.ApplicationWindow):
         self.chat = vbox(10)
         self.chat_intro = vbox(4)
         self.chat_intro.append(label("追问", "eyebrow"))
-        self.chat_intro.append(label("Ask anything about this English. Your questions are English practice "
-                                     "too: they go into your 知识点 when saywell learns offline.", "dim"))
+        self.chat_intro.append(label("Why this word? Too formal? Ask about any change.", "dim"))
+        self.meaning = vbox(6)   # meaning check, shown here once the progress is done
+        self.meaning.set_visible(False)
         right = vbox(14, "pane")
         right.append(self.progress)
+        right.append(self.meaning)
         right.append(self.chat_intro)
         right.append(self.chat)
         self.right_scroll = Gtk.ScrolledWindow(child=right, hscrollbar_policy=Gtk.PolicyType.NEVER,
@@ -241,6 +242,7 @@ class Popup(Adw.ApplicationWindow):
         footer.add_css_class("footer")
         footer.append(kbd("esc", "Cancel", self.close))
         footer.append(kbd("⌥ 1-3", "Pick"))
+        footer.append(kbd("⌥ ↵", "Edit in draft", lambda: self.use_as_draft(self.choice)))
         self.status = label("", "dim", wrap=False, xalign=1)
         self.status.set_hexpand(True)
         self.status.set_margin_end(10)
@@ -276,6 +278,8 @@ class Popup(Adw.ApplicationWindow):
             self.insert()
         elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and ctrl:
             self.analyze()
+        elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and alt:
+            self.use_as_draft(self.choice)
         elif alt and keyval in (Gdk.KEY_1, Gdk.KEY_2, Gdk.KEY_3):
             self.pick(self.VERSIONS[keyval - Gdk.KEY_1][0])
         else:
@@ -300,6 +304,7 @@ class Popup(Adw.ApplicationWindow):
         self.fraction = 0.0
         self.progress.set_visible(True)
         self.chat_intro.set_visible(False)
+        self.meaning.set_visible(False)
         self.show_steps()
         if not getattr(self, "ticker", None):
             self.ticker = GLib.timeout_add(80, self.tick)
@@ -332,7 +337,7 @@ class Popup(Adw.ApplicationWindow):
             self.step = len(self.STEPS)
             self.bar.set_fraction(1.0)
             self.show_steps()
-            GLib.timeout_add(600, lambda: (self.progress.set_visible(False),
+            GLib.timeout_add(600, lambda: (self.progress.set_visible(False), self.meaning.set_visible(True),
                                            self.chat_intro.set_visible(True)) and False)
         else:
             self.progress.set_visible(False)
@@ -415,7 +420,8 @@ class Popup(Adw.ApplicationWindow):
             self.set_status(f"Checking… {time.monotonic() - self.started:.0f} s")
         self.show_results(True)
         self.render_versions(a)
-        self.render_meaning(a, done)
+        if done:
+            self.render_meaning(a, done)
 
     def render_versions(self, a):
         self._rendering = True
@@ -457,7 +463,8 @@ class Popup(Adw.ApplicationWindow):
         flags = a.get("meaning_flags") or []
         if flags:
             card = vbox(4, "warn-card")
-            card.append(label("⚠  MEANING MAY HAVE CHANGED", "eyebrow"))
+            tone_only = all(f.startswith("（语气）") for f in flags)
+            card.append(label("◐  TONE CHANGED" if tone_only else "⚠  MEANING MAY HAVE CHANGED", "eyebrow"))
             for f in flags:
                 card.append(label(f"• {f}"))
             self.meaning.append(card)
@@ -475,6 +482,21 @@ class Popup(Adw.ApplicationWindow):
         for r in list(self.versions):
             if getattr(r, "key", None) == key:
                 self.versions.select_row(r)
+
+    def use_as_draft(self, key):
+        """Put a version into the draft box so the user can keep writing from it; the window stays open."""
+        if not self.analysis or key == "mine":
+            self.set_focus(self.input)
+            return
+        text = self.analysis.get(key) or ""
+        if not text:
+            return
+        buf = self.input.get_buffer()
+        buf.set_text(text)
+        buf.place_cursor(buf.get_end_iter())
+        self.set_focus(self.input)
+        self.toasts.add_toast(Adw.Toast(title=f"{self.NAMES[key]} version moved to the draft · ⌃↵ to check again",
+                                        timeout=3))
 
     # ---- follow-up questions ---------------------------------------------
 

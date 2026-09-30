@@ -76,10 +76,14 @@ Reply with ONLY these tagged sections, in this order, and nothing else:
 <fixed_zh>a faithful, literal Chinese translation of fixed. Do not smooth over mistakes: it is
   used to check that the meaning did not change.</fixed_zh>
 <improved_zh>a faithful, literal Chinese translation of improved.</improved_zh>
-<flag>zero or more flag sections, in Chinese. Each names one concrete spot where fixed or improved
-  may say something different from what the author meant: an idea added or dropped, a stronger or
-  weaker tone, a certainty change, an ambiguous word resolved one way. Quote the words involved.
-  Pure grammar fixes are not flags. No flag sections if the meaning is unchanged.</flag>"""
+<flag><changed>yes, tone or no</changed>one flag section, in Chinese, for each spot where fixed or
+  improved differs from the draft in more than grammar or spelling. Quote the words involved and say
+  what a reader would now understand differently. Set <changed>:
+    yes  = the meaning differs: an idea added or dropped, a different fact, an ambiguous word resolved one way;
+    tone = same point, but different politeness, directness, certainty or strength
+           (e.g. "maybe you can" -> "could you", "should maybe" -> "should", "must" -> "please");
+    no   = only a grammar, spelling, word-form or style fix with the same meaning.
+  Write the explanation for yes and tone; for no, leave the rest of the section empty.</flag>"""
 
 ASK_PROMPT = """You are an English tutor for a Chinese-speaking software engineer.
 They are polishing a message and ask a follow-up question about its English.
@@ -238,8 +242,18 @@ def parse_analysis(out):
         return [m.strip() for m in re.findall(rf"<{name}>(.*?)</{name}>", src, flags=re.S)]
     data = {key: (tags(key) or [""])[0] for key in ANALYSIS_FIELDS}
     # One flag per concern; models sometimes pack several into one section as a dash list.
-    flags = [line for f in tags("flag") for line in re.sub(r"</?\w+>", "", f).splitlines()]
-    data["meaning_flags"] = [f for f in (re.sub(r"^\s*[-•*]\s*", "", f).strip() for f in flags) if f]
+    # Each flag carries the model's own verdict: drop "no", mark tone-only changes.
+    flags = []
+    for f in tags("flag"):
+        verdict = (re.findall(r"<changed>\s*(\w+)\s*</changed>", f) or ["yes"])[0].lower()
+        if verdict == "no":
+            continue
+        body = re.sub(r"<changed>.*?</changed>|</?\w+>", "", f, flags=re.S)
+        for line in body.splitlines():
+            line = re.sub(r"^\s*[-•*]\s*", "", line).strip()
+            if line:
+                flags.append(f"（语气）{line}" if verdict == "tone" else line)
+    data["meaning_flags"] = flags
     return data
 
 
