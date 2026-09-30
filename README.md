@@ -15,7 +15,7 @@ mkdir -p ~/.config/fix-english && cp config.example.toml ~/.config/fix-english/c
 
 The default provider is `claude`: it runs `claude -p --model haiku` on your Claude subscription. The config also lists a local llama.cpp server and several free API providers.
 
-The popup needs GTK4 (PyGObject), `wl-copy`, `wtype` and Hyprland. Add this to `~/.config/hypr/bindings.lua`:
+The popup needs GTK4 and libadwaita (PyGObject), `wl-copy`, `wtype` and Hyprland. Its UI follows the GNOME HIG: a header bar with Cancel and Insert, and boxed lists for versions, meaning, notes and questions. Add this to `~/.config/hypr/bindings.lua`:
 
 ```lua
 o.bind("SUPER + ALT + E", "Fix English", os.getenv("HOME") .. "/.local/bin/fix-english-popup")
