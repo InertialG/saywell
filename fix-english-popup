@@ -37,15 +37,24 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 BACKEND = os.path.join(HERE, "fix-english") if os.path.exists(os.path.join(HERE, "fix-english")) \
     else shutil.which("fix-english") or "fix-english"
 
+# A compact, translucent dialog in the style of a Windows password prompt; Hyprland dims the rest.
 CSS = """
-window { font-size: 15px; }
-.section { font-weight: bold; margin-top: 10px; }
+window.popup { background-color: rgba(28, 29, 34, 0.95); color: #e6e6e6; font-size: 15px;
+               border-radius: 12px; }
+.title { font-size: 18px; font-weight: bold; }
+.card { background-color: rgba(255, 255, 255, 0.06); border-radius: 8px; }
+.card textview, .card textview text { background-color: transparent; color: #f0f0f0; }
+.card textview { padding: 10px; }
+scrolledwindow, viewport { background-color: transparent; }
+.section { font-weight: bold; margin-top: 12px; }
 .choice-text { margin-left: 26px; }
-.zh { margin-left: 26px; opacity: 0.7; }
-.flag { color: #d29922; }
-.error { color: #e5534b; }
-.hint { opacity: 0.6; font-size: 13px; }
-textview { padding: 8px; }
+.zh { margin-left: 26px; opacity: 0.65; }
+.flag { color: #e3b341; }
+.error { color: #f47067; }
+.hint { opacity: 0.55; font-size: 13px; }
+entry { background-color: rgba(255, 255, 255, 0.06); border: none; box-shadow: none; }
+button { border-radius: 6px; padding: 4px 18px; }
+button.suggested-action { background-color: #3b82f6; color: white; }
 """
 
 INS = '<span foreground="#57ab5a" weight="bold">{}</span>'
@@ -90,47 +99,58 @@ def label(text="", css=None, markup=False, selectable=True):
 
 class Popup(Gtk.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="fix-english", default_width=1100, default_height=620)
+        super().__init__(application=app, title="fix-english", default_width=760, default_height=640)
         self.analysis = None        # latest --json result
         self.history = []           # follow-up questions and answers
         self.proc = None            # running analysis
         self.choice = "fixed"
         self.inserted = None        # text to paste after the window closes
 
-        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, position=440, vexpand=True)
-        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_start=12, margin_top=12)
-        left.append(label("Draft", "section", selectable=False))
-        self.input = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, vexpand=True)
-        scroll_in = Gtk.ScrolledWindow(child=self.input, vexpand=True)
-        scroll_in.add_css_class("frame")
-        left.append(scroll_in)
-        paned.set_start_child(left)
+        self.set_decorated(False)
+        self.add_css_class("popup")
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_start=22, margin_end=22,
+                       margin_top=18, margin_bottom=16)
+        self.set_child(root)
+        root.append(label("Fix English", "title", selectable=False))
+        root.append(label("Write your message, mixing in Chinese if you like. Ctrl+Enter to check it.",
+                          "hint", selectable=False))
 
-        self.results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_start=12,
-                               margin_end=12, margin_top=12, margin_bottom=12)
-        paned.set_end_child(Gtk.ScrolledWindow(child=self.results, hexpand=True))
-        self.status = label("Type your draft, then press Ctrl+Enter.", "hint", selectable=False)
+        self.input = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        box_in = Gtk.ScrolledWindow(child=self.input, min_content_height=90, max_content_height=160,
+                                    propagate_natural_height=True)
+        box_in.add_css_class("card")
+        root.append(box_in)
+
+        self.results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_end=14)
+        root.append(Gtk.ScrolledWindow(child=self.results, vexpand=True,
+                                       hscrollbar_policy=Gtk.PolicyType.NEVER))
+        self.status = label("", "hint", selectable=False)
         self.results.append(self.status)
 
-        self.ask = Gtk.Entry(placeholder_text="Ask about the English, e.g. why not \"ensure\"?  (Enter)",
-                             hexpand=True)
+        self.ask = Gtk.Entry(placeholder_text="Ask about the English, e.g. why not \"ensure\"?", hexpand=True)
         self.ask.connect("activate", self.on_ask)
-        bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_start=12,
-                         margin_end=12, margin_bottom=10, margin_top=6)
-        bottom.append(self.ask)
-        bottom.append(label("Ctrl+Enter analyze · Alt+1/2/3 pick · Ctrl+Shift+Enter insert · Esc close",
-                            "hint", selectable=False))
+        root.append(self.ask)
 
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        root.append(paned)
-        root.append(bottom)
-        self.set_child(root)
+        buttons = Gtk.Box(spacing=8)
+        hint = label("Alt+1/2/3 pick · Esc cancel", "hint", selectable=False)
+        hint.set_wrap(False)
+        buttons.append(hint)
+        buttons.append(Gtk.Box(hexpand=True))
+        for text, tip, action, css in (("Check", "Ctrl+Enter", self.analyze, None),
+                                       ("Insert", "Ctrl+Shift+Enter", self.insert, "suggested-action"),
+                                       ("Cancel", "Esc", self.close, None)):
+            btn = Gtk.Button(label=text, tooltip_text=tip, focusable=False)
+            btn.connect("clicked", lambda _b, f=action: f())
+            if css:
+                btn.add_css_class(css)
+            buttons.append(btn)
+        root.append(buttons)
 
         keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
         keys.connect("key-pressed", self.on_key)
         self.add_controller(keys)
         self.connect("close-request", lambda *_: self.stop() or False)
-        self.input.grab_focus()
+        self.set_focus(self.input)
 
     # ---- keys -------------------------------------------------------------
 

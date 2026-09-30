@@ -3,7 +3,7 @@
 Tools for a non-native speaker writing English to AI coding agents:
 
 - `fix-english`: reads a draft on stdin and prints it with the grammar and spelling fixed and any Chinese translated. Use it as an editor filter.
-- `fix-english-popup`: a GTK4 window, opened with a hotkey, for writing a message with help. It shows fixed and improved versions, a Chinese back-translation to check the meaning, learning notes, and answers to follow-up questions. Then it pastes the chosen version where the cursor was.
+- `fix-english-popup`: a compact dialog in the style of a Windows password prompt (the screen dims behind it), opened with a hotkey, for writing a message with help. It shows fixed and improved versions, a Chinese back-translation to check the meaning, learning notes, and answers to follow-up questions. Then it pastes the chosen version where the cursor was.
 
 ## Setup
 
@@ -24,7 +24,10 @@ o.bind("SUPER + ALT + E", "Fix English", os.getenv("HOME") .. "/.local/bin/fix-e
 Add this to `~/.config/hypr/hyprland.lua`:
 
 ```lua
-o.window("^uno\\.guan810\\.FixEnglish$", { float = true, center = true, size = { 1100, 640 } })
+o.window("^uno\\.guan810\\.FixEnglish$", {
+  float = true, center = true, size = { 760, 640 }, pin = true,
+  dim_around = true, rounding = 12, border_size = 0, tag = "-default-opacity",
+})
 ```
 
 ## CLI
