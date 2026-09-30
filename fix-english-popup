@@ -1,0 +1,359 @@
+#!/usr/bin/env python3
+"""fix-english-popup: a GTK4 window for writing English with help, bound to a Hyprland hotkey.
+
+Type a draft (mixing Chinese is fine), press Ctrl+Enter to analyze it with `fix-english --json`,
+pick a version, and press Ctrl+Shift+Enter: the window closes and the text is pasted where the
+cursor was in the window you came from.
+
+Keys:
+  Ctrl+Enter        analyze the draft (again)
+  Alt+1 / 2 / 3     pick fixed / improved / my draft
+  Ctrl+Shift+Enter  insert the picked version into the previous window
+  Enter (Ask box)   ask a follow-up question about the English
+  Esc               close without inserting
+"""
+
+import difflib
+import html
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
+
+APP_ID = "uno.guan810.FixEnglish"
+# Terminals paste with Ctrl+Shift+V; everything else with Ctrl+V.
+TERMINALS = re.compile(r"ghostty|foot|alacritty|kitty|wezterm|konsole|terminal", re.I)
+# Prefer the fix-english next to this script, so the repo copy runs its own backend.
+HERE = os.path.dirname(os.path.realpath(__file__))
+BACKEND = os.path.join(HERE, "fix-english") if os.path.exists(os.path.join(HERE, "fix-english")) \
+    else shutil.which("fix-english") or "fix-english"
+
+CSS = """
+window { font-size: 15px; }
+.section { font-weight: bold; margin-top: 10px; }
+.choice-text { margin-left: 26px; }
+.zh { margin-left: 26px; opacity: 0.7; }
+.flag { color: #d29922; }
+.error { color: #e5534b; }
+.hint { opacity: 0.6; font-size: 13px; }
+textview { padding: 8px; }
+"""
+
+INS = '<span foreground="#57ab5a" weight="bold">{}</span>'
+DEL = '<span foreground="#e5534b" strikethrough="true">{}</span>'
+
+
+def diff_markup(old, new):
+    """Word-level diff of new against old as Pango markup."""
+    tokenize = lambda s: re.findall(r"\s+|\w+|[^\w\s]", s)
+    a, b = tokenize(old), tokenize(new)
+    out = []
+    for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if op == "equal":
+            out.append(html.escape("".join(a[i1:i2])))
+            continue
+        removed, added = "".join(a[i1:i2]), "".join(b[j1:j2])
+        if removed.strip():
+            out.append(DEL.format(html.escape(removed)))
+            if added.strip():
+                out.append(" ")  # visual gap between the old and new words
+        if added.strip():
+            out.append(INS.format(html.escape(added)))
+        elif added:
+            out.append(added)
+    return "".join(out)
+
+
+def md_markup(text):
+    """Escape text and turn **bold** and `code` into Pango markup."""
+    text = html.escape(text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    return re.sub(r"`([^`]+)`", r"<tt>\1</tt>", text)
+
+
+def label(text="", css=None, markup=False, selectable=True):
+    w = Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR, selectable=selectable)
+    (w.set_markup if markup else w.set_text)(text)
+    for c in (css or "").split():
+        w.add_css_class(c)
+    return w
+
+
+class Popup(Gtk.ApplicationWindow):
+    def __init__(self, app):
+        super().__init__(application=app, title="fix-english", default_width=1100, default_height=620)
+        self.analysis = None        # latest --json result
+        self.history = []           # follow-up questions and answers
+        self.proc = None            # running analysis
+        self.choice = "fixed"
+        self.inserted = None        # text to paste after the window closes
+
+        paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, position=440, vexpand=True)
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_start=12, margin_top=12)
+        left.append(label("Draft", "section", selectable=False))
+        self.input = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, vexpand=True)
+        scroll_in = Gtk.ScrolledWindow(child=self.input, vexpand=True)
+        scroll_in.add_css_class("frame")
+        left.append(scroll_in)
+        paned.set_start_child(left)
+
+        self.results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_start=12,
+                               margin_end=12, margin_top=12, margin_bottom=12)
+        paned.set_end_child(Gtk.ScrolledWindow(child=self.results, hexpand=True))
+        self.status = label("Type your draft, then press Ctrl+Enter.", "hint", selectable=False)
+        self.results.append(self.status)
+
+        self.ask = Gtk.Entry(placeholder_text="Ask about the English, e.g. why not \"ensure\"?  (Enter)",
+                             hexpand=True)
+        self.ask.connect("activate", self.on_ask)
+        bottom = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_start=12,
+                         margin_end=12, margin_bottom=10, margin_top=6)
+        bottom.append(self.ask)
+        bottom.append(label("Ctrl+Enter analyze · Alt+1/2/3 pick · Ctrl+Shift+Enter insert · Esc close",
+                            "hint", selectable=False))
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        root.append(paned)
+        root.append(bottom)
+        self.set_child(root)
+
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self.on_key)
+        self.add_controller(keys)
+        self.connect("close-request", lambda *_: self.stop() or False)
+        self.input.grab_focus()
+
+    # ---- keys -------------------------------------------------------------
+
+    def on_key(self, _ctl, keyval, _code, state):
+        ctrl = state & Gdk.ModifierType.CONTROL_MASK
+        shift = state & Gdk.ModifierType.SHIFT_MASK
+        alt = state & Gdk.ModifierType.ALT_MASK
+        if keyval == Gdk.KEY_Escape:
+            self.close()
+        elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and ctrl and shift:
+            self.insert()
+        elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and ctrl:
+            self.analyze()
+        elif alt and keyval in (Gdk.KEY_1, Gdk.KEY_2, Gdk.KEY_3):
+            self.pick(("fixed", "improved", "mine")[keyval - Gdk.KEY_1])
+        else:
+            return False
+        return True
+
+    # ---- analysis ---------------------------------------------------------
+
+    def draft(self):
+        buf = self.input.get_buffer()
+        return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False).strip()
+
+    def stop(self):
+        if self.proc:
+            self.proc.force_exit()
+            self.proc = None
+
+    def analyze(self):
+        text = self.draft()
+        if not text:
+            return
+        self.stop()
+        self.history = []
+        self.analysis = None
+        self.started = time.monotonic()
+        self.show_status("Analyzing… the fixed version shows up first.")
+        proc = Gio.Subprocess.new([BACKEND, "--json", "--stream"],
+                                  Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
+                                  | Gio.SubprocessFlags.STDERR_PIPE)
+        self.proc = proc
+        stdin = proc.get_stdin_pipe()
+        stdin.write_bytes(GLib.Bytes.new(text.encode()), None)
+        stdin.close(None)
+        stream = Gio.DataInputStream.new(proc.get_stdout_pipe())
+        stream.read_line_async(GLib.PRIORITY_DEFAULT, None, self.on_line, (proc, stream))
+
+    def on_line(self, stream, result, data):
+        proc, _ = data
+        if proc is not self.proc:
+            return  # replaced or closed
+        line, _ = stream.read_line_finish_utf8(result)
+        if line is None:
+            proc.wait_async(None, self.on_exit, None)
+            return
+        try:
+            self.analysis = json.loads(line)
+            self.render()
+        except json.JSONDecodeError:
+            pass
+        stream.read_line_async(GLib.PRIORITY_DEFAULT, None, self.on_line, data)
+
+    def on_exit(self, proc, result, _):
+        proc.wait_finish(result)
+        if proc is not self.proc:
+            return
+        self.proc = None
+        if proc.get_exit_status() != 0 or not (self.analysis and self.analysis.get("done")):
+            err = proc.get_stderr_pipe().read_bytes(4096, None).get_data().decode(errors="replace")
+            self.show_status(err.strip() or "analysis failed", error=True, keep=bool(self.analysis))
+        else:
+            self.render()
+
+    # ---- rendering --------------------------------------------------------
+
+    def clear(self):
+        while child := self.results.get_first_child():
+            self.results.remove(child)
+
+    def show_status(self, text, error=False, keep=False):
+        if not keep:
+            self.clear()
+        self.status = label(text, "error" if error else "hint", selectable=error)
+        self.results.prepend(self.status)
+
+    def render(self):
+        a = self.analysis
+        self.clear()
+        done = a.get("done")
+        status = (f"Done in {a.get('ms', 0) / 1000:.1f} s" if done
+                  else f"Analyzing… {time.monotonic() - self.started:.0f} s")
+        self.results.append(label(status, "hint", selectable=False))
+
+        group = None
+        self.checks = {}
+        rows = [("fixed", "1  Fixed", a.get("fixed"), a.get("fixed_zh")),
+                ("improved", "2  Improved", a.get("improved"), a.get("improved_zh")),
+                ("mine", "3  My draft", self.draft(), None)]
+        for key, title, text, zh in rows:
+            if not text:
+                continue
+            check = Gtk.CheckButton(label=title, group=group, active=(key == self.choice))
+            check.connect("toggled", lambda c, k=key: c.get_active() and setattr(self, "choice", k))
+            group = group or check
+            self.checks[key] = check
+            self.results.append(check)
+            body = diff_markup(a["original"], text) if key != "mine" else html.escape(text)
+            self.results.append(label(body, "choice-text", markup=True))
+            if zh:
+                self.results.append(label(f"含义: {zh}", "zh"))
+            if key == "improved" and a.get("why"):
+                self.results.append(label(f"为什么: {a['why']}", "zh"))
+
+        if a.get("meaning_flags"):
+            self.results.append(label("⚠ 含义可能变化", "section flag", selectable=False))
+            for f in a["meaning_flags"]:
+                self.results.append(label(f"• {f}", "flag"))
+        elif done:
+            self.results.append(label("✓ 含义未变 (still compare the 含义 lines with what you meant)",
+                                      "section", selectable=False))
+
+        if a.get("notes"):
+            self.results.append(label("知识点", "section", selectable=False))
+            for n in a["notes"]:
+                self.results.append(label(f"<b>{html.escape(n['point'])}</b>\n{html.escape(n.get('detail', ''))}",
+                                          markup=True))
+
+        if self.history:
+            self.results.append(label("Q & A", "section", selectable=False))
+            for qa in self.history:
+                self.results.append(label(f"<b>Q: {html.escape(qa['q'])}</b>", markup=True))
+                self.results.append(label(md_markup(qa["a"]) if qa["a"] else "…", markup=True))
+
+    def pick(self, key):
+        if key in getattr(self, "checks", {}):
+            self.checks[key].set_active(True)
+
+    # ---- follow-up questions ---------------------------------------------
+
+    def on_ask(self, entry):
+        question = entry.get_text().strip()
+        if not question or not self.analysis or not self.analysis.get("done"):
+            return
+        entry.set_text("")
+        qa = {"q": question, "a": ""}
+        context = {**self.analysis, "history": list(self.history)}
+        self.history.append(qa)
+        self.render()
+        proc = Gio.Subprocess.new([BACKEND, "--ask", question],
+                                  Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
+                                  | Gio.SubprocessFlags.STDERR_PIPE)
+        proc.communicate_utf8_async(json.dumps(context, ensure_ascii=False), None, self.on_answer, qa)
+
+    def on_answer(self, proc, result, qa):
+        _, out, err = proc.communicate_utf8_finish(result)
+        qa["a"] = (out if proc.get_exit_status() == 0 else f"Error: {err}").strip()
+        if qa in self.history:
+            self.render()
+
+    # ---- insert -----------------------------------------------------------
+
+    def insert(self):
+        if self.choice == "mine" or not self.analysis:
+            text = self.draft()
+        else:
+            text = self.analysis.get(self.choice) or self.analysis.get("fixed") or ""
+        if not text:
+            return
+        self.inserted = text
+        self.close()
+
+
+def paste_into(target, text):
+    """Focus the window we came from and paste text there via the clipboard.
+    Pasting, not typing, keeps fcitx5 out of the way and keeps newlines from sending a chat message."""
+    subprocess.run(["wl-copy"], input=text.encode(), check=False)
+    if target:
+        subprocess.run(["hyprctl", "dispatch", f'hl.dsp.focus({{ window = "address:{target["address"]}" }})'],
+                       capture_output=True, check=False)
+    time.sleep(0.3)  # let focus settle and the hotkey's modifiers be released
+    mods = ["ctrl", "shift"] if target and TERMINALS.search(target.get("class", "")) else ["ctrl"]
+    cmd = ["wtype"]
+    for m in mods:
+        cmd += ["-M", m]
+    cmd += ["-k", "v"]
+    for m in reversed(mods):
+        cmd += ["-m", m]
+    subprocess.run(cmd, check=False)
+
+
+def active_window():
+    try:
+        out = subprocess.run(["hyprctl", "activewindow", "-j"], capture_output=True, text=True, timeout=2).stdout
+        win = json.loads(out)
+        return win if win.get("address") else None
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        return None
+
+
+def main():
+    # Remember where the cursor is before our window takes focus.
+    target = active_window()
+    app = Gtk.Application(application_id=APP_ID)
+    windows = []
+
+    def on_activate(app):
+        if windows:  # hotkey pressed again: just raise the open window
+            windows[0].present()
+            return
+        css = Gtk.CssProvider()
+        css.load_from_string(CSS)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css,
+                                                  Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        windows.append(Popup(app))
+        windows[0].present()
+
+    app.connect("activate", on_activate)
+    app.run([sys.argv[0]])
+    if windows and windows[0].inserted:
+        paste_into(target, windows[0].inserted)
+
+
+if __name__ == "__main__":
+    main()

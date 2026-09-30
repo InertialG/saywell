@@ -1,0 +1,63 @@
+# fix-english providers. Every provider speaks the OpenAI chat-completions API.
+# Pick one with: default = "...", $FIX_ENGLISH_PROVIDER, or `fix-english -p NAME`.
+# Compare them with: fix-english --bench
+# See a provider's models with: fix-english --models -p NAME
+#
+# Model names change often; if one fails, run --models and update it here.
+# `extra` is merged into the request body (e.g. reasoning_effort, max_tokens).
+
+default = "claude"
+
+# Claude Code CLI (`claude -p`), billed to your Claude subscription, not an API key.
+# Tools, MCP, hooks and thinking are disabled for speed.
+[providers.claude]
+type = "claude-cli"
+model = "haiku"
+timeout = 60
+
+# llama.cpp + MiniCPM5-2B Q8_0 (Vulkan):
+#   llama-server -m ~/Downloads/Sharp-MiniCPM5-2B-Q8_K_M.gguf -ngl 99 --host 127.0.0.1 --port 8080 --jinja
+# llama-server serves whatever model it loaded, so `model` is just a label.
+[providers.local]
+base_url = "http://127.0.0.1:8080/v1"
+model = "minicpm5-2b"
+timeout = 30
+# No thinking (speed); no "Sharp" terseness prompt (it can make the model ask questions).
+extra = { chat_template_kwargs = { enable_thinking = false, terse = false }, max_tokens = 1024 }
+
+[providers.groq]
+base_url = "https://api.groq.com/openai/v1"
+model = "llama-3.1-8b-instant"
+api_key_env = "GROQ_API_KEY"
+
+[providers.gemini]
+base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+model = "gemini-2.5-flash-lite"
+api_key_env = "GEMINI_API_KEY"
+
+# OpenRouter free models: 20 req/min; 50 req/day (1000/day after $10 credits bought).
+# List current free models: fix-english --models -p openrouter | grep :free
+[providers.openrouter]
+base_url = "https://openrouter.ai/api/v1"
+model = "google/gemma-4-26b-a4b-it:free"
+api_key_env = "OPENROUTER_API_KEY"
+
+[providers.openrouter-qwen]
+base_url = "https://openrouter.ai/api/v1"
+model = "qwen/qwen3.8-27b:free"
+api_key_env = "OPENROUTER_API_KEY"
+
+[providers.openrouter-lfm]
+base_url = "https://openrouter.ai/api/v1"
+model = "liquid/lfm-2.5-2.6b:free"
+api_key_env = "OPENROUTER_API_KEY"
+
+[providers.cerebras]
+base_url = "https://api.cerebras.ai/v1"
+model = "llama3.1-8b"
+api_key_env = "CEREBRAS_API_KEY"
+
+[providers.agnes]
+base_url = "https://apihub.agnes-ai.com/v1"
+model = "agnes-3.0-flash"
+api_key_env = "AGNES_API_KEY"
