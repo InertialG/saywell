@@ -15,7 +15,7 @@ mkdir -p ~/.config/fix-english && cp config.example.toml ~/.config/fix-english/c
 
 The default provider is `claude`: it runs `claude -p --model haiku` on your Claude subscription. The config also lists a local llama.cpp server and several free API providers.
 
-The popup needs GTK4 and libadwaita (PyGObject), `wl-copy`, `wtype` and Hyprland. Its UI follows the GNOME HIG: a header bar with Cancel and Insert, and boxed lists for versions, meaning, notes and questions. Add this to `~/.config/hypr/bindings.lua`:
+The popup needs GTK4 and libadwaita (PyGObject), `wl-copy`, `wtype` and Hyprland. Its layout is modelled on Raycast: the draft as a top bar, versions on the left (changed words highlighted; hover a version to list its changes), 知识点 cards and a follow-up chat on the right, and a footer of clickable key hints. Add this to `~/.config/hypr/bindings.lua`:
 
 ```lua
 o.bind("SUPER + ALT + E", "Fix English", os.getenv("HOME") .. "/.local/bin/fix-english-popup")
@@ -25,7 +25,7 @@ Add this to `~/.config/hypr/hyprland.lua`:
 
 ```lua
 o.window("^uno\\.guan810\\.FixEnglish$", {
-  float = true, center = true, size = { 760, 640 }, pin = true,
+  float = true, center = true, size = { 1040, 660 }, pin = true,
   dim_around = true, rounding = 12, border_size = 0, tag = "-default-opacity",
 })
 ```
@@ -47,9 +47,10 @@ Every change is logged to `~/.local/share/fix-english/log.jsonl`.
 | Key | Action |
 |---|---|
 | Ctrl+Enter | analyze the draft |
-| Alt+1 / 2 / 3 | pick fixed / improved / my draft |
+| Alt+1 / 2 / 3, or click a version | pick fixed / improved / my draft |
+| Double-click a version | paste it |
 | Ctrl+Shift+Enter | paste the picked version into the previous window |
-| Enter in the Ask box | ask a follow-up question |
+| Enter in the follow-up box | ask a question about the English |
 | Esc | close without pasting |
 
 The text goes back through the clipboard and a paste shortcut, not typed keystrokes. The paste shortcut is Ctrl+Shift+V in terminals and Ctrl+V elsewhere. Typed keystrokes would go through fcitx5, and a newline would send a chat message. The pasted text stays on the clipboard afterwards.

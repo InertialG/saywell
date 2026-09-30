@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""fix-english-popup: a libadwaita dialog for writing English with help, bound to a Hyprland hotkey.
+"""fix-english-popup: a Raycast-style panel for writing English with help, bound to a Hyprland hotkey.
 
 Type a draft (mixing Chinese is fine), press Ctrl+Enter to analyze it with `fix-english --json`,
 pick a version, and press Ctrl+Shift+Enter: the window closes and the text is pasted where the
@@ -28,7 +28,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Pango  # noqa: E402
 
 APP_ID = "uno.guan810.FixEnglish"
 # Terminals paste with Ctrl+Shift+V; everything else with Ctrl+V.
@@ -38,43 +38,65 @@ HERE = os.path.dirname(os.path.realpath(__file__))
 BACKEND = os.path.join(HERE, "fix-english") if os.path.exists(os.path.join(HERE, "fix-english")) \
     else shutil.which("fix-english") or "fix-english"
 
-# A compact dialog in the style of a Windows password prompt: Hyprland dims the rest of the screen
-# and the window is slightly translucent. Everything else is stock libadwaita.
+# A Raycast-style panel: the draft as a top bar, versions on the left, notes and a follow-up chat on
+# the right, key hints in a footer. Hyprland dims the rest of the screen (see README).
 CSS = """
-window.popup { background-color: alpha(@window_bg_color, 0.95); }
-window.popup headerbar { background-color: transparent; box-shadow: none; }
-.draft textview, .draft textview text { background-color: transparent; }
-.draft textview { padding: 12px; }
+window.popup { background-color: rgba(26, 26, 30, 0.96); color: #ececf1; }
+.draft, .draft text { background-color: transparent; color: #f4f4f6; font-size: 17px; }
+.topbar { padding: 14px 18px 12px 18px; }
+.divider { background-color: rgba(255, 255, 255, 0.08); min-height: 1px; min-width: 1px; }
+.pane { padding: 10px 12px; }
+.eyebrow { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; color: #8e8e98; }
+.dim { color: #8e8e98; }
+.muted { color: #b4b4bd; }
+list.versions { background: transparent; }
+list.versions row { border-radius: 10px; padding: 12px 14px; margin-bottom: 6px;
+                    background-color: rgba(255, 255, 255, 0.03); }
+list.versions row:hover { background-color: rgba(255, 255, 255, 0.06); }
+list.versions row:selected { background-color: alpha(@accent_bg_color, 0.18);
+                             box-shadow: inset 3px 0 0 @accent_bg_color; }
+list.versions row:focus-visible { outline: 1px solid alpha(@accent_bg_color, 0.6); }
+.version-text { font-size: 16px; color: #f4f4f6; }
+.warn-card { border-radius: 10px; padding: 10px 14px; background-color: rgba(246, 211, 45, 0.08); }
+.warn-card label { color: #f6d32d; }
+.ok-line { color: #8ff0a4; }
+.note-card { border-radius: 10px; padding: 10px 14px; background-color: rgba(255, 255, 255, 0.04); }
+.note-title { font-weight: 700; color: #f4f4f6; }
+.bubble-me { border-radius: 14px 14px 4px 14px; padding: 7px 12px; background-color: @accent_bg_color;
+             color: white; }
+.answer { padding: 2px 2px; }
+entry.ask { border-radius: 10px; background-color: rgba(255, 255, 255, 0.06); min-height: 36px;
+            box-shadow: none; outline: none; }
+.footer { padding: 8px 12px; background-color: rgba(255, 255, 255, 0.025); }
+.kbd { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 5px;
+       background-color: rgba(255, 255, 255, 0.09); color: #d6d6dc; }
+button.hint { padding: 3px 8px; min-height: 0; border-radius: 7px; font-size: 13px; color: #b4b4bd; }
+button.hint.primary { color: #f4f4f6; background-color: rgba(255, 255, 255, 0.07); }
 """
 
-
-def colors():
-    """Pango markup for inserted and deleted words, readable on the current light or dark style."""
-    dark = Adw.StyleManager.get_default().get_dark()
-    ins, dele = ("#8ff0a4", "#ff7b63") if dark else ("#1b7a3d", "#c01c28")
-    return (f'<span foreground="{ins}" weight="bold">{{}}</span>',
-            f'<span foreground="{dele}" strikethrough="true">{{}}</span>')
+HIGHLIGHT = '<span background="#3584e4" bgalpha="32%" foreground="#ffffff">{}</span>'
 
 
-def diff_markup(old, new):
-    """Word-level diff of new against old as Pango markup."""
+def highlight_markup(old, new):
+    """Markup for new with the changed words highlighted, plus a list of 'old → new' changes."""
     tokenize = lambda s: re.findall(r"\s+|\w+|[^\w\s]", s)
     a, b = tokenize(old), tokenize(new)
-    out = []
+    out, changes = [], []
     for op, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        added = "".join(b[j1:j2])
         if op == "equal":
-            out.append(html.escape("".join(a[i1:i2])))
+            out.append(html.escape(added))
             continue
-        removed, added = "".join(a[i1:i2]), "".join(b[j1:j2])
-        if removed.strip():
-            out.append(colors()[1].format(html.escape(removed)))
-            if added.strip():
-                out.append(" ")  # visual gap between the old and new words
+        removed = "".join(a[i1:i2]).strip()
         if added.strip():
-            out.append(colors()[0].format(html.escape(added)))
-        elif added:
-            out.append(added)
-    return "".join(out)
+            lead = added[:len(added) - len(added.lstrip())]
+            trail = added[len(added.rstrip()):]
+            out.append(lead + HIGHLIGHT.format(html.escape(added.strip())) + trail)
+        else:
+            out.append(html.escape(added))
+        if removed or added.strip():
+            changes.append(f"{removed or '∅'} → {added.strip() or '∅'}")
+    return "".join(out), changes
 
 
 def md_markup(text):
@@ -84,97 +106,142 @@ def md_markup(text):
     return re.sub(r"`([^`]+)`", r"<tt>\1</tt>", text)
 
 
-def row(title, subtitle="", markup=False):
-    """An ActionRow whose title and subtitle wrap instead of being cut off."""
-    r = Adw.ActionRow(title=title if markup else GLib.markup_escape_text(title),
-                      subtitle=subtitle if markup else GLib.markup_escape_text(subtitle),
-                      title_lines=0, subtitle_lines=0, title_selectable=True)
-    return r
+def label(text="", css="", markup=False, wrap=True, xalign=0, selectable=False):
+    w = Gtk.Label(xalign=xalign, wrap=wrap, wrap_mode=Pango.WrapMode.WORD_CHAR, selectable=selectable)
+    (w.set_markup if markup else w.set_text)(text)
+    for c in css.split():
+        w.add_css_class(c)
+    return w
 
 
-def icon(name, css=None):
-    img = Gtk.Image(icon_name=name)
-    if css:
-        img.add_css_class(css)
-    return img
+def kbd(keys, text, action=None, primary=False):
+    """A footer hint: key caps followed by a word, clickable when it has an action."""
+    box = Gtk.Box(spacing=6)
+    for k in keys.split():
+        box.append(label(k, "kbd", wrap=False))
+    word = label(text, wrap=False)
+    box.append(word)
+    btn = Gtk.Button(child=box, focusable=False)
+    btn.add_css_class("flat")
+    btn.add_css_class("hint")
+    if primary:
+        btn.add_css_class("primary")
+    if action:
+        btn.connect("clicked", lambda _b: action())
+    btn.word = word
+    return btn
+
+
+def vbox(spacing=0, css=""):
+    b = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=spacing)
+    for c in css.split():
+        b.add_css_class(c)
+    return b
+
+
+def divider(vertical=False):
+    d = Gtk.Box()
+    d.add_css_class("divider")
+    return d
+
+
+def clear(box):
+    while child := box.get_first_child():
+        box.remove(child)
 
 
 class Popup(Adw.ApplicationWindow):
-    VERSIONS = (("fixed", "Fixed", "Alt+1"), ("improved", "Improved", "Alt+2"), ("mine", "My draft", "Alt+3"))
+    VERSIONS = (("fixed", "FIXED", "⌥1"), ("improved", "IMPROVED", "⌥2"), ("mine", "MY DRAFT", "⌥3"))
+    NAMES = {"fixed": "Fixed", "improved": "Improved", "mine": "My draft"}
 
     def __init__(self, app):
-        super().__init__(application=app, title="Fix English", default_width=760, default_height=640)
+        super().__init__(application=app, title="Fix English", default_width=1040, default_height=660)
         self.add_css_class("popup")
         self.analysis = None        # latest --json result
         self.history = []           # follow-up questions and answers
         self.proc = None            # running analysis
         self.choice = "fixed"
-        self.checks = {}
         self.inserted = None        # text to paste after the window closes
 
-        header = Adw.HeaderBar(show_start_title_buttons=False, show_end_title_buttons=False)
-        cancel = Gtk.Button(label="Cancel", tooltip_text="Esc")
-        cancel.connect("clicked", lambda _b: self.close())
-        header.pack_start(cancel)
-        insert = Gtk.Button(label="Insert", tooltip_text="Paste the selected version where your cursor was "
-                                                         "(Ctrl+Shift+Enter)")
-        insert.add_css_class("suggested-action")
-        insert.connect("clicked", lambda _b: self.insert())
-        header.pack_end(insert)
-
-        # Draft: a multi-line text view in a card, with a placeholder while it is empty.
-        self.input = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, accepts_tab=False)
+        # Top bar: the draft, like a launcher's search field.
+        self.input = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, accepts_tab=False, hexpand=True)
+        self.input.add_css_class("draft")
         self.input.update_property([Gtk.AccessibleProperty.LABEL], ["Draft"])
-        placeholder = Gtk.Label(label="Type your message; Chinese words are fine", xalign=0, yalign=0,
-                                margin_start=12, margin_top=12, can_target=False)
-        placeholder.add_css_class("dimmed")
-        buf = self.input.get_buffer()
-        buf.connect("changed", lambda b: placeholder.set_visible(b.get_char_count() == 0))
-        overlay = Gtk.Overlay(child=Gtk.ScrolledWindow(child=self.input, min_content_height=96,
-                                                       max_content_height=180, propagate_natural_height=True))
-        overlay.add_overlay(placeholder)
-        overlay.add_css_class("card")
-        overlay.add_css_class("draft")
-
+        placeholder = label("Type your message — Chinese words are fine", "dim draft", wrap=False)
+        placeholder.set_can_target(False)
+        placeholder.set_valign(Gtk.Align.START)
+        self.input.get_buffer().connect("changed", lambda b: placeholder.set_visible(b.get_char_count() == 0))
+        draft = Gtk.Overlay(child=Gtk.ScrolledWindow(child=self.input, min_content_height=28, max_content_height=130,
+                                                     propagate_natural_height=True, hexpand=True,
+                                                     hscrollbar_policy=Gtk.PolicyType.NEVER))
+        draft.add_overlay(placeholder)
         self.spinner = Adw.Spinner(visible=False)
-        self.status = Gtk.Label(xalign=0, hexpand=True)
-        self.status.add_css_class("caption")
-        self.status.add_css_class("dimmed")
-        check = Gtk.Button(label="Check", tooltip_text="Check the English (Ctrl+Enter)")
-        check.connect("clicked", lambda _b: self.analyze())
-        status_row = Gtk.Box(spacing=6)
-        for w in (self.spinner, self.status, check):
-            status_row.append(w)
+        top = Gtk.Box(spacing=12)
+        top.add_css_class("topbar")
+        top.append(draft)
+        check = kbd("⌃ ↵", "Check", self.analyze)
+        check.set_valign(Gtk.Align.START)
+        self.spinner.set_valign(Gtk.Align.START)
+        top.append(self.spinner)
+        top.append(check)
 
-        # Results: versions, meaning check and notes are rebuilt on every update; Ask stays put
-        # so its entry keeps focus and text while answers arrive.
-        self.results = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-        self.ask_group = Adw.PreferencesGroup(title="Ask", visible=False)
-        self.ask = Adw.EntryRow(title="Ask about the English, e.g. why not \u201censure\u201d?",
-                                show_apply_button=True)
-        self.ask.connect("entry-activated", self.on_ask)
-        self.ask.connect("apply", self.on_ask)
-        self.ask_group.add(self.ask)
-        self.answer_rows = []
+        # Left: versions as selectable cards, then the meaning check.
+        self.versions = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.versions.add_css_class("versions")
+        self.versions.connect("row-selected", self.on_row_selected)
+        self.versions.connect("row-activated", lambda *_: self.insert())
+        self.meaning = vbox(6)
+        self.left_empty = label("Press ⌃↵ to check your draft.\nVersions appear here.", "dim", xalign=0.5)
+        self.left_empty.set_justify(Gtk.Justification.CENTER)
+        self.left_empty.set_vexpand(True)
+        left = vbox(10, "pane")
+        left.append(self.left_empty)
+        left.append(self.versions)
+        left.append(self.meaning)
+        left_scroll = Gtk.ScrolledWindow(child=left, hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
 
-        results_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18, margin_top=6, margin_bottom=12)
-        results_box.append(self.results)
-        results_box.append(self.ask_group)
-        scroll = Gtk.ScrolledWindow(child=Adw.Clamp(child=results_box, maximum_size=720), vexpand=True,
-                                    hscrollbar_policy=Gtk.PolicyType.NEVER)
+        # Right: 知识点 cards, then the follow-up chat with its entry pinned at the bottom.
+        self.notes = vbox(8)
+        self.chat = vbox(10)
+        right = vbox(14, "pane")
+        right.append(self.notes)
+        right.append(self.chat)
+        self.right_scroll = Gtk.ScrolledWindow(child=right, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                               vexpand=True)
+        self.ask = Gtk.Entry(placeholder_text="Ask a follow-up…  e.g. why not “ensure”?")
+        self.ask.add_css_class("ask")
+        self.ask.connect("activate", self.on_ask)
+        ask_box = vbox(0, "pane")
+        ask_box.append(self.ask)
+        right_col = vbox()
+        right_col.append(self.right_scroll)
+        right_col.append(ask_box)
 
-        top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        top.append(overlay)
-        top.append(status_row)
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_start=12, margin_end=12)
-        content.append(Adw.Clamp(child=top, maximum_size=720))
-        content.append(scroll)
+        body = Gtk.Paned(position=560, shrink_start_child=False, shrink_end_child=False, vexpand=True)
+        body.set_start_child(left_scroll)
+        body.set_end_child(right_col)
 
-        self.toasts = Adw.ToastOverlay(child=content)
-        view = Adw.ToolbarView(content=self.toasts, top_bar_style=Adw.ToolbarStyle.FLAT)
-        view.add_top_bar(header)
-        self.set_content(view)
-        self.set_status()
+        # Footer: key hints, clickable.
+        footer = Gtk.Box(spacing=4)
+        footer.add_css_class("footer")
+        footer.append(kbd("esc", "Cancel", self.close))
+        footer.append(kbd("⌥ 1-3", "Pick"))
+        self.status = label("", "dim", wrap=False, xalign=1)
+        self.status.set_hexpand(True)
+        self.status.set_margin_end(10)
+        footer.append(self.status)
+        self.insert_hint = kbd("⌃ ⇧ ↵", "Insert Fixed", self.insert, primary=True)
+        footer.append(self.insert_hint)
+
+        root = vbox()
+        root.append(top)
+        root.append(divider())
+        root.append(body)
+        root.append(divider())
+        root.append(footer)
+        self.toasts = Adw.ToastOverlay(child=root)
+        self.set_content(self.toasts)
+        self.show_results(False)
 
         keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
         keys.connect("key-pressed", self.on_key)
@@ -206,9 +273,13 @@ class Popup(Adw.ApplicationWindow):
         buf = self.input.get_buffer()
         return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False).strip()
 
-    def set_status(self, text="Ctrl+Enter to check", busy=False):
+    def set_status(self, text="", busy=False):
         self.status.set_text(text)
         self.spinner.set_visible(busy)
+
+    def show_results(self, shown):
+        self.left_empty.set_visible(not shown)
+        self.versions.set_visible(shown)
 
     def stop(self):
         if self.proc:
@@ -222,12 +293,10 @@ class Popup(Adw.ApplicationWindow):
             return
         self.stop()
         self.analysis = None
-        for qa in self.history:
-            self.ask_group.remove(qa["row"])
         self.history = []
+        clear(self.chat)
         self.started = time.monotonic()
         self.set_status("Checking…", busy=True)
-        self.clear()
         proc = Gio.Subprocess.new([BACKEND, "--json", "--stream"],
                                   Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
                                   | Gio.SubprocessFlags.STDERR_PIPE)
@@ -259,30 +328,29 @@ class Popup(Adw.ApplicationWindow):
             return
         self.proc = None
         if proc.get_exit_status() == 0 and self.analysis and self.analysis.get("done"):
-            self.set_status(f"Checked in {self.analysis.get('ms', 0) / 1000:.1f} s · Ctrl+Enter to check again")
+            self.set_status(f"Checked in {self.analysis.get('ms', 0) / 1000:.1f} s")
             self.render()
             return
         err = proc.get_stderr_pipe().read_bytes(4096, None).get_data().decode(errors="replace").strip()
         err = re.sub(r"^fix-english \[\w+\]: ", "", err) or "the check failed"
-        self.set_status("Check failed · Ctrl+Enter to try again")
+        self.set_status("Check failed")
         self.toasts.add_toast(Adw.Toast(title=GLib.markup_escape_text(err[:120]), timeout=6))
 
     # ---- rendering --------------------------------------------------------
 
-    def clear(self):
-        while child := self.results.get_first_child():
-            self.results.remove(child)
-        self.ask_group.set_visible(False)
-
     def render(self):
         a = self.analysis
         done = a.get("done")
-        self.clear()
         if not done:
             self.set_status(f"Checking… {time.monotonic() - self.started:.0f} s", busy=True)
+        self.show_results(True)
+        self.render_versions(a)
+        self.render_meaning(a, done)
+        self.render_notes(a)
 
-        versions = Adw.PreferencesGroup(title="Versions")
-        group, self.checks = None, {}
+    def render_versions(self, a):
+        self._rendering = True
+        clear(self.versions)
         texts = {"fixed": (a.get("fixed"), a.get("fixed_zh")),
                  "improved": (a.get("improved"), a.get("improved_zh")),
                  "mine": (self.draft(), None)}
@@ -290,74 +358,108 @@ class Popup(Adw.ApplicationWindow):
             text, zh = texts[key]
             if not text:
                 continue
-            title = diff_markup(a["original"], text) if key != "mine" else GLib.markup_escape_text(text)
-            sub = [f"含义：{GLib.markup_escape_text(zh)}"] if zh else []
+            card = vbox(6)
+            head = Gtk.Box()
+            head.append(label(name, "eyebrow", wrap=False))
+            head.append(Gtk.Box(hexpand=True))
+            head.append(label(keys, "kbd", wrap=False))
+            card.append(head)
+            if key == "mine":
+                card.append(label(html.escape(text), "version-text", markup=True))
+            else:
+                markup, changes = highlight_markup(a["original"], text)
+                card.append(label(markup, "version-text", markup=True))
+                if changes:
+                    card.set_tooltip_text("Changes:\n" + "\n".join(changes))
+            if zh:
+                card.append(label(f"含义  {zh}", "muted"))
             if key == "improved" and a.get("why"):
-                sub.append(f"为什么：{GLib.markup_escape_text(a['why'])}")
-            r = row(title, "\n".join(sub), markup=True)
-            check = Gtk.CheckButton(group=group, active=(key == self.choice), valign=Gtk.Align.CENTER)
-            check.update_property([Gtk.AccessibleProperty.LABEL], [name])
-            check.connect("toggled", lambda c, k=key: c.get_active() and setattr(self, "choice", k))
-            group = group or check
-            self.checks[key] = check
-            r.add_prefix(check)
-            r.set_activatable_widget(check)
-            tag = Gtk.Label(label=name, tooltip_text=keys, valign=Gtk.Align.CENTER)
-            tag.add_css_class("caption")
-            tag.add_css_class("dimmed")
-            r.add_suffix(tag)
-            versions.add(r)
-        self.results.append(versions)
+                card.append(label(f"为什么  {a['why']}", "dim"))
+            r = Gtk.ListBoxRow(child=card)
+            r.key = key
+            r.update_property([Gtk.AccessibleProperty.LABEL], [self.NAMES[key]])
+            self.versions.append(r)
+            if key == self.choice:
+                self.versions.select_row(r)
+        self._rendering = False
 
-        if a.get("meaning_flags") or done:
-            meaning = Adw.PreferencesGroup(title="Meaning")
-            for f in a.get("meaning_flags", []):
-                r = row(f)
-                r.add_prefix(icon("dialog-warning-symbolic", "warning"))
-                meaning.add(r)
-            if not a.get("meaning_flags"):
-                r = row("No change in meaning found", "Still compare the 含义 lines with what you meant")
-                r.add_prefix(icon("emblem-ok-symbolic", "success"))
-                meaning.add(r)
-            self.results.append(meaning)
+    def render_meaning(self, a, done):
+        clear(self.meaning)
+        flags = a.get("meaning_flags") or []
+        if flags:
+            card = vbox(4, "warn-card")
+            card.append(label("⚠  MEANING MAY HAVE CHANGED", "eyebrow"))
+            for f in flags:
+                card.append(label(f"• {f}"))
+            self.meaning.append(card)
+        elif done:
+            self.meaning.append(label("✓  Meaning unchanged — still compare the 含义 lines with what you meant",
+                                      "ok-line"))
 
-        if a.get("notes"):
-            notes = Adw.PreferencesGroup(title="Notes")
-            for n in a["notes"]:
-                notes.add(row(n["point"], n.get("detail", "")))
-            self.results.append(notes)
+    def render_notes(self, a):
+        clear(self.notes)
+        notes = a.get("notes") or []
+        self.notes.append(label("知识点", "eyebrow"))
+        if not notes:
+            self.notes.append(label("Notes on words and grammar appear here." if not a.get("done")
+                                    else "Nothing to learn here — the draft was already fine.", "dim"))
+        for n in notes:
+            card = vbox(4, "note-card")
+            card.append(label(n["point"], "note-title", selectable=True))
+            if n.get("detail"):
+                card.append(label(n["detail"], "muted", selectable=True))
+            self.notes.append(card)
 
-        self.ask_group.set_visible(bool(done))
+    def on_row_selected(self, _list, row):
+        if row is not None and not getattr(self, "_rendering", False):
+            self.choice = row.key
+        if row is not None:
+            self.insert_hint.word.set_text(f"Insert {self.NAMES[self.choice]}")
 
     def pick(self, key):
-        if key in self.checks:
-            self.checks[key].set_active(True)
+        for r in list(self.versions):
+            if getattr(r, "key", None) == key:
+                self.versions.select_row(r)
 
     # ---- follow-up questions ---------------------------------------------
 
     def on_ask(self, entry):
         question = entry.get_text().strip()
-        if not question or not self.analysis or not self.analysis.get("done"):
+        if not question:
+            return
+        if not self.analysis or not self.analysis.get("done"):
+            self.toasts.add_toast(Adw.Toast(title="Check the draft first", timeout=2))
             return
         entry.set_text("")
-        context = {**self.analysis, "history": [qa for qa in self.history if qa["a"]]}
-        qa = {"q": question, "a": ""}
+        context = {**self.analysis, "history": [{"q": qa["q"], "a": qa["a"]} for qa in self.history if qa["a"]]}
+        if not self.history:
+            self.chat.append(label("追问", "eyebrow"))
+        bubble = label(question, "bubble-me", selectable=True)
+        bubble.set_halign(Gtk.Align.END)
+        bubble.set_max_width_chars(40)
+        self.chat.append(bubble)
+        answer = label("Thinking…", "answer dim", selectable=True)
+        self.chat.append(answer)
+        qa = {"q": question, "a": "", "label": answer}
         self.history.append(qa)
-        r = row(question, "Thinking…")
-        self.ask_group.add(r)
-        qa["row"] = r
+        self.scroll_chat()
         proc = Gio.Subprocess.new([BACKEND, "--ask", question],
                                   Gio.SubprocessFlags.STDIN_PIPE | Gio.SubprocessFlags.STDOUT_PIPE
                                   | Gio.SubprocessFlags.STDERR_PIPE)
-        proc.communicate_utf8_async(json.dumps(context, ensure_ascii=False, default=str), None,
-                                    self.on_answer, qa)
+        proc.communicate_utf8_async(json.dumps(context, ensure_ascii=False), None, self.on_answer, qa)
 
     def on_answer(self, proc, result, qa):
         _, out, err = proc.communicate_utf8_finish(result)
         ok = proc.get_exit_status() == 0
         qa["a"] = (out if ok else err).strip()
         if qa in self.history:
-            qa["row"].set_subtitle(md_markup(qa["a"]) if ok else GLib.markup_escape_text(f"Error: {qa['a']}"))
+            qa["label"].remove_css_class("dim")
+            qa["label"].set_markup(md_markup(qa["a"]) if ok else GLib.markup_escape_text(f"Error: {qa['a']}"))
+            self.scroll_chat()
+
+    def scroll_chat(self):
+        adj = self.right_scroll.get_vadjustment()
+        GLib.idle_add(lambda: adj.set_value(adj.get_upper()) and False)
 
     # ---- insert -----------------------------------------------------------
 
@@ -410,6 +512,7 @@ def main():
         if windows:  # hotkey pressed again: just raise the open window
             windows[0].present()
             return
+        Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
         css = Gtk.CssProvider()
         css.load_from_string(CSS)
         Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), css,
