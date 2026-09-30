@@ -2,19 +2,26 @@
 
 Say it well: write English to AI coding agents with help, and learn from your own mistakes.
 
+![The saywell popup checking a draft that mixes Chinese and English](docs/popup.gif)
+
 - `saywell`: reads a draft on stdin and prints it with the grammar fixed and any Chinese translated. It works as an editor filter, such as nvim `<leader>cg`.
 - `saywell-popup`: a Raycast-style panel on a hotkey. Type a draft, check it, pick a version and paste it where your cursor was.
 - `saywell --learn`: works offline, away from your writing. It reads everything you wrote (drafts and follow-up questions) and extracts 知识点 into a personal knowledge base. Repeated mistakes are counted.
 
+The CLI needs only Python 3.11+ and runs anywhere. The popup is built for Hyprland on Wayland (Linux).
+
 ## Setup
 
 ```sh
-ln -s ~/Work/saywell/saywell ~/.local/bin/saywell
-ln -s ~/Work/saywell/saywell-popup ~/.local/bin/saywell-popup
+git clone <this repo> && cd saywell
+ln -s "$PWD/saywell" ~/.local/bin/saywell
+ln -s "$PWD/saywell-popup" ~/.local/bin/saywell-popup   # optional, Hyprland only
 mkdir -p ~/.config/saywell && cp config.example.toml ~/.config/saywell/config.toml
 ```
 
 The default provider is `claude`: it runs `claude -p --model haiku` on your Claude subscription. The config also lists a local llama.cpp server and several free API providers.
+
+Privacy: your drafts go to the provider you pick. Everything else (the log, the 知识点 and the usage records) stays on your machine.
 
 The popup needs GTK4 and libadwaita (PyGObject), `wl-copy`, `wtype` and Hyprland. Add this to `~/.config/hypr/bindings.lua`:
 
@@ -34,7 +41,7 @@ o.window("^uno\\.guan810\\.Saywell$", {
 To learn every hour, use the systemd user timer:
 
 ```sh
-ln -s ~/Work/saywell/contrib/saywell-learn.{service,timer} ~/.config/systemd/user/
+ln -s "$PWD"/contrib/saywell-learn.{service,timer} ~/.config/systemd/user/
 systemctl --user daemon-reload && systemctl --user enable --now saywell-learn.timer
 ```
 
@@ -73,3 +80,7 @@ Data lives in `~/.local/share/saywell/`:
 | Esc | close without pasting |
 
 The text goes back through the clipboard and a paste shortcut, not typed keystrokes. The paste shortcut is Ctrl+Shift+V in terminals and Ctrl+V elsewhere. Typed keystrokes would go through fcitx5, and a newline would send a chat message. The pasted text stays on the clipboard afterwards.
+
+## License
+
+MIT

@@ -1,5 +1,5 @@
 # saywell providers. Every provider speaks the OpenAI chat-completions API.
-# Pick one with: default = "...", $FIX_ENGLISH_PROVIDER, or `saywell -p NAME`.
+# Pick one with: default = "...", $SAYWELL_PROVIDER, or `saywell -p NAME`.
 # Compare them with: saywell --bench
 # See a provider's models with: saywell --models -p NAME
 #
