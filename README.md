@@ -13,7 +13,7 @@ The CLI needs only Python 3.11+ and runs anywhere. The popup is built for Hyprla
 ## Setup
 
 ```sh
-git clone <this repo> && cd saywell
+git clone https://github.com/InertialG/saywell.git && cd saywell
 ln -s "$PWD/saywell" ~/.local/bin/saywell
 ln -s "$PWD/saywell-popup" ~/.local/bin/saywell-popup   # optional, Hyprland only
 mkdir -p ~/.config/saywell && cp config.example.toml ~/.config/saywell/config.toml
