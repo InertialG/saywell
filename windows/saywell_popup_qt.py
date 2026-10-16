@@ -35,9 +35,9 @@ Parity with saywell-popup (GTK), item by item:
   [x] every key above, including double-click on a version and keypad Enter; key caps read
       Ctrl / Alt / Shift / Enter instead of ⌃ ⌥ ⇧ ↵, which Windows fonts render poorly
   [x] a new check or closing the window kills the running backend
-  [-] paste into the previous window: deferred to the system integration stage; here insert puts the
-      text on the clipboard and emits `inserted` (GTK uses wl-copy + hyprctl + wtype, Hyprland only)
-  [-] single instance / raise on a second hotkey press (GTK: Gtk.Application): same stage, it owns the hotkey
+  [x] paste into the previous window: saywell_tray.py, connected to `inserted`; standalone, insert only
+      puts the text on the clipboard (GTK uses wl-copy + hyprctl + wtype, Hyprland only)
+  [x] single instance / raise on a second hotkey press (GTK: Gtk.Application): saywell_tray.py
   [-] screen dimming: Hyprland compositor rule in the GTK version, no equivalent here
 """
 
