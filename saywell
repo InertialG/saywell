@@ -18,12 +18,16 @@ Usage:
 
 Config: ~/.config/saywell/config.toml
 Data:   ~/.local/share/saywell/ (log.jsonl, notes.jsonl, usage.jsonl)
+On Windows the same paths under %USERPROFILE%; run it as `python saywell`.
+claude-cli runs $SAYWELL_CLAUDE, the provider's `command`, or `claude` from PATH
+(on Windows the claude.exe behind the npm shim).
 """
 
 import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -152,56 +156,162 @@ def request(provider, path, body=None, timeout=None):
         raise RuntimeError(f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}") from None
     except urllib.error.URLError as e:
         raise RuntimeError(f"cannot reach {url}: {e.reason}") from None
+    except TimeoutError:  # the server accepted but did not answer in time
+        raise RuntimeError(f"{url} timed out") from None
+
+
+CLAUDE_PACKAGE = Path("node_modules", "@anthropic-ai", "claude-code")
+
+
+def claude_command(provider):
+    """The argv prefix that runs Claude Code: $SAYWELL_CLAUDE, the provider's `command`
+    (a path or an argv list), or `claude` from PATH. On Windows `claude` in PATH is an npm
+    .cmd/.ps1 shim that subprocess can't run (and cmd.exe would mangle the multi-line
+    system prompt), so look for the real claude.exe behind it."""
+    override = os.environ.get("SAYWELL_CLAUDE") or provider.get("command")
+    if override:
+        return [override] if isinstance(override, str) else [str(a) for a in override]
+    if sys.platform != "win32":
+        return ["claude"]
+    cmd = find_claude_windows()
+    if not cmd:
+        raise RuntimeError("claude.exe not found: install Claude Code, or set $SAYWELL_CLAUDE "
+                           "or `command` in the provider config to the full path of claude.exe")
+    return cmd
+
+
+def find_claude_windows():
+    """claude.exe from PATH, then behind an npm/Volta shim in PATH, then in the usual install dirs."""
+    exe = shutil.which("claude.exe")
+    if exe:
+        return [exe]
+    for d in filter(None, os.environ.get("PATH", "").split(os.pathsep)):
+        d = Path(d)
+        for shim in ("claude.cmd", "claude.ps1", "claude"):
+            if (d / shim).is_file():
+                cmd = shim_target(d / shim) or claude_package(d / CLAUDE_PACKAGE)
+                if cmd:
+                    return cmd
+    home, env = Path.home(), os.environ
+    dirs = [home / ".local" / "bin",  # native installer
+            Path(env.get("APPDATA", home / "AppData" / "Roaming")) / "npm"]
+    volta = Path(env.get("VOLTA_HOME") or Path(env.get("LOCALAPPDATA", home / "AppData" / "Local")) / "Volta")
+    dirs += sorted((volta / "tools" / "image" / "node").glob("*"), reverse=True)
+    for d in dirs:
+        if (d / "claude.exe").is_file():
+            return [str(d / "claude.exe")]
+        cmd = claude_package(d / CLAUDE_PACKAGE)
+        if cmd:
+            return cmd
+    for pkg in sorted((volta / "tools" / "image" / "packages").glob("**/" + CLAUDE_PACKAGE.as_posix()),
+                      reverse=True):
+        cmd = claude_package(pkg)
+        if cmd:
+            return cmd
+    return None
+
+
+def shim_target(shim):
+    """The .exe an npm shim (claude.cmd / claude.ps1) runs, relative to the shim's dir."""
+    try:
+        text = shim.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for rel in re.findall(r'(?:%dp0%|%~dp0|\$basedir)[\\/]+([^"\s%$]+?\.exe)', text, flags=re.I):
+        exe = shim.parent / rel.replace("\\", "/")
+        if exe.name.lower() != "node.exe" and exe.is_file():
+            return [str(exe.resolve())]
+    return None
+
+
+def claude_package(pkg):
+    """argv for an installed @anthropic-ai/claude-code package: its bin/claude.exe, or node cli.js."""
+    if (pkg / "bin" / "claude.exe").is_file():
+        return [str(pkg / "bin" / "claude.exe")]
+    node = shutil.which("node")
+    if node and (pkg / "cli.js").is_file():
+        return [node, str(pkg / "cli.js")]
+    return None
+
+
+def kill_tree(proc):
+    """Stop a timed-out child. On Windows also whatever it started (taskkill /T);
+    on Linux, as before, only the child itself."""
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        proc.kill()
+    except OSError:
+        pass  # already gone
 
 
 def claude_cli(provider, system, prompt, on_text=None):
     """Run a one-shot, tool-less `claude -p`; it logs in with the Claude subscription.
     With on_text, stream the reply and call on_text(reply_so_far) as text arrives.
     Returns (reply, result event); the result event carries usage and total_cost_usd."""
-    cmd = ["claude", "-p", "--model", provider["model"], "--system-prompt", system,
-           "--tools", "", "--strict-mcp-config", "--disable-slash-commands",
-           "--no-session-persistence", "--setting-sources", ""]
+    cmd = claude_command(provider) + [
+        "-p", "--model", provider["model"], "--system-prompt", system,
+        "--tools", "", "--strict-mcp-config", "--disable-slash-commands",
+        "--no-session-persistence", "--setting-sources", ""]
     if on_text:
         cmd += ["--output-format", "stream-json", "--include-partial-messages", "--verbose"]
     else:
         cmd += ["--output-format", "json"]
     env = {**os.environ, "MAX_THINKING_TOKENS": "0", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
     env.pop("ANTHROPIC_API_KEY", None)  # would bill the API instead of the subscription
+    env.pop("CLAUDECODE", None)  # set when run from a Claude Code session; claude -p refuses to nest
     # Run from an empty dir so no project CLAUDE.md is pulled into the prompt.
     cwd = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "saywell"
     cwd.mkdir(parents=True, exist_ok=True)
     timeout = provider.get("timeout", 30)
-    if not on_text:
-        try:
-            res = subprocess.run(cmd, input=prompt, capture_output=True, text=True, env=env, cwd=cwd,
-                                 timeout=timeout)
-        except FileNotFoundError:
-            raise RuntimeError("`claude` not found in PATH") from None
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("claude timed out") from None
-        try:
-            result = json.loads(res.stdout)
-        except json.JSONDecodeError:
-            result = {}
-        if res.returncode != 0 or result.get("is_error"):
-            error = str(result.get("result") or result.get("subtype") or "") or res.stderr or res.stdout
-            raise RuntimeError(error.strip()[:300] or f"claude exited {res.returncode}")
-        return result.get("result", ""), result
-
+    # Pipes are bytes, coded as UTF-8 here, so the locale's code page (cp936 ...) never applies.
     try:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, env=env, cwd=cwd)
+                                stderr=subprocess.PIPE, env=env, cwd=cwd)
     except FileNotFoundError:
-        raise RuntimeError("`claude` not found in PATH") from None
-    timer = threading.Timer(timeout, proc.kill)
+        raise RuntimeError(f"`{cmd[0]}` not found in PATH") from None
+    if not on_text:
+        try:
+            out, err = proc.communicate(prompt.encode("utf-8"), timeout=timeout)
+        except subprocess.TimeoutExpired:
+            kill_tree(proc)
+            # Don't read the pipes to EOF: on Linux a grandchild of claude may still hold them.
+            # On Windows the whole tree is gone; communicate() joins its reader threads.
+            if sys.platform == "win32":
+                proc.communicate()
+            else:
+                proc.wait()
+                proc.stdout.close()
+                proc.stderr.close()
+            raise RuntimeError("claude timed out") from None
+        out, err = out.decode("utf-8", errors="replace"), err.decode("utf-8", errors="replace")
+        try:
+            result = json.loads(out)
+        except json.JSONDecodeError:
+            result = {}
+        if proc.returncode != 0 or result.get("is_error"):
+            error = str(result.get("result") or result.get("subtype") or "") or err or out
+            raise RuntimeError(error.strip()[:300] or f"claude exited {proc.returncode}")
+        return result.get("result", ""), result
+
+    # The timer records that it fired, so a timeout is recognized without POSIX exit codes.
+    timed_out = threading.Event()
+    def on_timeout():
+        timed_out.set()
+        kill_tree(proc)
+    timer = threading.Timer(timeout, on_timeout)
     timer.start()
     reply, error, result = "", "", {}
     try:
-        proc.stdin.write(prompt)
-        proc.stdin.close()
+        try:
+            proc.stdin.write(prompt.encode("utf-8"))
+            proc.stdin.close()
+        except OSError:
+            pass  # claude exited early; its error is on stderr
         for line in proc.stdout:
             try:
-                event = json.loads(line)
+                event = json.loads(line.decode("utf-8", errors="replace"))
             except json.JSONDecodeError:
                 continue
             if event.get("type") == "stream_event":
@@ -216,10 +326,11 @@ def claude_cli(provider, system, prompt, on_text=None):
         proc.wait()
     finally:
         timer.cancel()
+    if timed_out.is_set():
+        raise RuntimeError("claude timed out")
     if proc.returncode != 0 or error:
-        if not timer.is_alive() and proc.returncode == -9:
-            raise RuntimeError("claude timed out")
-        raise RuntimeError((error or proc.stderr.read()).strip()[:300] or f"claude exited {proc.returncode}")
+        error = error or proc.stderr.read().decode("utf-8", errors="replace")
+        raise RuntimeError(error.strip()[:300] or f"claude exited {proc.returncode}")
     return reply, result
 
 
@@ -343,7 +454,7 @@ def now():
 
 def append_jsonl(path, entry):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as f:
+    with path.open("a", encoding="utf-8", newline="\n") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
@@ -449,7 +560,7 @@ def note_key(note):
 def load_notes():
     if not NOTES_PATH.exists():
         return {}
-    notes = [json.loads(line) for line in NOTES_PATH.read_text().splitlines() if line.strip()]
+    notes = [json.loads(line) for line in NOTES_PATH.read_text(encoding="utf-8").splitlines() if line.strip()]
     return {n["key"]: n for n in notes}
 
 
@@ -480,14 +591,14 @@ def cmd_learn(config, name, batch_size):
     if not LOG_PATH.exists():
         print("nothing logged yet")
         return
-    state = json.loads(LEARN_STATE.read_text()) if LEARN_STATE.exists() else {"offset": 0}
+    state = json.loads(LEARN_STATE.read_text(encoding="utf-8")) if LEARN_STATE.exists() else {"offset": 0}
     with LOG_PATH.open("rb") as f:
         f.seek(state["offset"])
         raw = f.read()
     # Only whole lines: the popup may be appending right now.
     raw = raw[:raw.rfind(b"\n") + 1]
     entries = []
-    for line in raw.decode(errors="replace").splitlines():
+    for line in raw.decode("utf-8", errors="replace").splitlines():
         try:
             entries.append(json.loads(line))
         except json.JSONDecodeError:
@@ -507,14 +618,16 @@ def cmd_learn(config, name, batch_size):
         print(f"  {min(i + batch_size, len(sources))}/{len(sources)} messages: {new} new, {rep} repeats",
               flush=True)
     LEARN_STATE.parent.mkdir(parents=True, exist_ok=True)
-    LEARN_STATE.write_text(json.dumps({"offset": state["offset"] + len(raw), "ts": now()}))
+    LEARN_STATE.write_text(json.dumps({"offset": state["offset"] + len(raw), "ts": now()}),
+                           encoding="utf-8")
     print(f"{len(sources)} messages → {total_new} new notes, {total_rep} repeats ({len(known)} in total)")
 
 
 def write_notes(known):
     NOTES_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = NOTES_PATH.with_suffix(".tmp")
-    tmp.write_text("".join(json.dumps(n, ensure_ascii=False) + "\n" for n in known.values()))
+    tmp.write_text("".join(json.dumps(n, ensure_ascii=False) + "\n" for n in known.values()),
+                   encoding="utf-8", newline="\n")
     tmp.replace(NOTES_PATH)
 
 
@@ -535,7 +648,8 @@ def cmd_usage(days):
         print("no usage logged yet")
         return
     since = time.strftime("%Y-%m-%d", time.localtime(time.time() - (days - 1) * 86400))
-    entries = [e for e in map(json.loads, USAGE_PATH.read_text().splitlines()) if e["ts"][:10] >= since]
+    lines = USAGE_PATH.read_text(encoding="utf-8").splitlines()
+    entries = [e for e in map(json.loads, lines) if e["ts"][:10] >= since]
     def table(title, key):
         groups = {}
         for e in entries:
@@ -595,8 +709,18 @@ def cmd_list(config):
         print(f"{mark} {name:<16} {p['model']:<40} {key}")
 
 
+def use_utf8_stdio():
+    """UTF-8 on stdin/stdout/stderr whatever the locale (Windows pipes default to its code page,
+    e.g. cp936), and "\\n" line ends so the --json --stream lines are the same bytes everywhere."""
+    if sys.stdin:
+        sys.stdin.reconfigure(encoding="utf-8-sig")  # -sig: drop a BOM from PowerShell 5.1 pipes
+    for stream in (sys.stdout, sys.stderr):
+        if stream:
+            stream.reconfigure(encoding="utf-8", newline="\n")
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Fix English text from stdin with an OpenAI-compatible LLM.")
+    ap =argparse.ArgumentParser(description="Fix English text from stdin with an OpenAI-compatible LLM.")
     ap.add_argument("-p", "--provider", help="provider name from config (default: $SAYWELL_PROVIDER or config default)")
     ap.add_argument("--bench", action="store_true", help="run sample sentences through providers and show latency")
     ap.add_argument("--models", action="store_true", help="list models available from the provider")
@@ -610,6 +734,7 @@ def main():
                     help="show tokens and cost of model calls over the last DAYS days")
     ap.add_argument("--ask", metavar="QUESTION", help="answer a question about the --json analysis read from stdin")
     args = ap.parse_args()
+    use_utf8_stdio()
     config = load_config()
     if args.list:
         cmd_list(config)
