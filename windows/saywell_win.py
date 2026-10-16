@@ -28,6 +28,8 @@ HERE = Path(__file__).resolve().parent
 CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "saywell" / "config.toml"
 DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "saywell"
 TRAY_SCRIPT = HERE / "saywell_tray.py"
+# saywell-tray.exe of a `uv tool install`, set by saywell_app's entry points; None from a checkout.
+LAUNCHER = None
 RUN_NAME = "Saywell"
 INSTANCE_NAME = "saywell-tray-" + os.environ.get("USERNAME", "user")
 
@@ -162,8 +164,12 @@ def in_uv_cache(executable):
     return any(a == "uv" and b == "cache" for a, b in zip(parts, parts[1:]))
 
 
-def autostart_command(executable=None, script=TRAY_SCRIPT, which=shutil.which):
-    """The command line the Run key starts at logon."""
+def autostart_command(executable=None, script=TRAY_SCRIPT, which=shutil.which, launcher=None):
+    """The command line the Run key starts at logon: the installed saywell-tray.exe when there is
+    one, else this script on pythonw (or through uv, from a `uv run --with` environment)."""
+    launcher = launcher or LAUNCHER
+    if launcher:
+        return f'"{launcher}"'
     executable = executable or sys.executable
     if in_uv_cache(executable):
         uv = which("uvw") or which("uv")

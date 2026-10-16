@@ -1,0 +1,39 @@
+# For `uv tool install` (mainly Windows). On Linux the scripts still work as they are,
+# symlinked into ~/.local/bin; nothing here is needed for that.
+[project]
+name = "saywell"
+version = "0.1.0"
+description = "Say it well: write English to AI coding agents with help, and learn from your own mistakes."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+# The tray and the Qt popup are Windows only; the CLI needs only the standard library.
+dependencies = ["pyside6-essentials>=6.6; sys_platform == 'win32'"]
+
+[project.scripts]
+saywell = "saywell_app:cli"
+saywell-autostart = "saywell_app:autostart"
+
+[project.gui-scripts]
+saywell-tray = "saywell_app:tray"
+
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+# The wheel keeps the repo layout under saywell_app/, so saywell_app/windows/*.py find the
+# backend at ../saywell just as they do in a checkout.
+[tool.hatch.build.targets.wheel]
+packages = ["saywell_app"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"saywell" = "saywell_app/saywell"
+"config.example.toml" = "saywell_app/config.example.toml"
+"windows/win32.py" = "saywell_app/windows/win32.py"
+"windows/saywell_win.py" = "saywell_app/windows/saywell_win.py"
+"windows/saywell_tray.py" = "saywell_app/windows/saywell_tray.py"
+"windows/saywell_popup_qt.py" = "saywell_app/windows/saywell_popup_qt.py"
+
+[tool.hatch.build.targets.sdist]
+include = ["saywell", "saywell-popup", "config.example.toml", "saywell_app", "windows", "contrib",
+           "tests", "README.md", "LICENSE"]

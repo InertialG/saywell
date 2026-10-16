@@ -12,7 +12,9 @@ you were typing in, and the version you insert is pasted back there.
   - tray menu: open, learn now, start at logon, quit
   - log: $XDG_DATA_HOME/saywell/tray.log
 
-Run:        uv run --no-project --with pyside6-essentials pythonw windows/saywell_tray.py [--backend PATH]
+Installed:  uv tool install <repo>  ->  saywell-tray [--backend PATH], saywell-autostart enable|disable|status
+            (saywell_app calls main(); at logon it runs saywell-tray.exe)
+Checkout:   uv run --no-project --with pyside6-essentials pythonw windows/saywell_tray.py [--backend PATH]
 Autostart:  ... python windows/saywell_tray.py autostart enable|disable|status [--command CMD]
 """
 
@@ -460,7 +462,8 @@ def main(argv=None, win=None):
     auto = sub.add_parser("autostart", help="start the tray at logon (HKCU Run key)")
     auto.add_argument("action", choices=("enable", "disable", "status"))
     auto.add_argument("--command", dest="run_command",
-                      help="with enable: the command line to run (default: this script)")
+                      help="with enable: the command line to run (default: saywell-tray.exe if installed, "
+                           "else this script)")
     args = ap.parse_args(argv)
     if sys.platform != "win32" and win is None:
         sys.exit("saywell_tray: Windows only; on Linux use saywell-popup")

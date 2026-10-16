@@ -8,7 +8,7 @@ Say it well: write English to AI coding agents with help, and learn from your ow
 - `saywell-popup`: a Raycast-style panel on a hotkey. Type a draft, check it, pick a version and paste it where your cursor was.
 - `saywell --learn`: works offline, away from your writing. It reads everything you wrote (drafts and follow-up questions) and extracts 知识点 into a personal knowledge base. Repeated mistakes are counted.
 
-The CLI needs only Python 3.11+ and runs anywhere. The popup is built for Hyprland on Wayland (Linux).
+The CLI needs only Python 3.11+ and runs anywhere. The popup is built for Hyprland on Wayland (Linux). On Windows a tray app opens a Qt port of the popup on a global hotkey; see [Windows](#windows).
 
 ## Setup
 
@@ -80,6 +80,96 @@ Data lives in `~/.local/share/saywell/`:
 | Esc | close without pasting |
 
 The text goes back through the clipboard and a paste shortcut, not typed keystrokes. The paste shortcut is Ctrl+Shift+V in terminals and Ctrl+V elsewhere. Typed keystrokes would go through fcitx5, and a newline would send a chat message. The pasted text stays on the clipboard afterwards.
+
+## Windows
+
+On Windows saywell is a tray app. A global hotkey opens the popup over the window you are typing in, and the version you insert is pasted back into that window. The CLI and `--learn` work as on Linux.
+
+### Install
+
+You need [uv](https://docs.astral.sh/uv/) and Claude Code (or an API provider, see below). uv brings a Python 3.11+ and PySide6 (`pyside6-essentials`, installed on Windows only).
+
+```powershell
+uv tool install git+https://github.com/InertialG/saywell.git
+# or, from a clone:  git clone https://github.com/InertialG/saywell.git; cd saywell; uv tool install .
+saywell-tray                       # start the tray now
+saywell-autostart enable           # and at every logon (or tick "Start at logon" in the tray menu)
+```
+
+This installs three commands into uv's tool bin dir (`uv tool dir --bin`; run `uv tool update-shell` once if it is not in PATH):
+
+- `saywell`: the CLI, the same as on Linux (see [CLI](#cli)).
+- `saywell-tray`: the tray, with no console window. Started again while it runs, it opens the popup of the running tray instead.
+- `saywell-autostart enable|disable|status`: start `saywell-tray` at logon. It writes the `Saywell` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, pointing at the installed `saywell-tray.exe`.
+
+To upgrade, quit the tray (Windows locks a running exe), then run `uv tool upgrade saywell`. From a clone, run `uv tool install --reinstall .`.
+
+### Claude and providers
+
+The default provider runs `claude -p --model haiku` on your Claude subscription. Install Claude Code and log in once with `claude`. On Windows the `claude` in PATH is an npm `.cmd`/`.ps1` shim that Python cannot start, so saywell looks for the real `claude.exe`: first in PATH, then behind the npm or Volta shim, then in `~\.local\bin` (the native installer) and `%APPDATA%\npm`. If it is somewhere else, set `$env:SAYWELL_CLAUDE` or `command` in the provider to the full path of `claude.exe`. The API providers in the config work the same as on Linux.
+
+### Config and data
+
+The paths are the Linux ones under your user profile, and `XDG_CONFIG_HOME` / `XDG_DATA_HOME` move them as on Linux:
+
+- Config: `%USERPROFILE%\.config\saywell\config.toml`. The first run of `saywell` or `saywell-tray` copies `config.example.toml` there if it is missing. It never overwrites an existing config.
+- Data: `%USERPROFILE%\.local\share\saywell\` (`log.jsonl`, `notes.jsonl`, `learn-state.json`, `usage.jsonl`, as on Linux), plus `tray.log`, the tray's log.
+
+The tray reads a `[windows]` table in the same config. The backend ignores it.
+
+```toml
+[windows]
+hotkey = "Win+Alt+E"              # opens the popup
+paste = "Ctrl+V"                  # paste keys for ordinary windows
+terminal_paste = "Ctrl+Shift+V"   # paste keys for terminals
+extra_terminals = ["myterm.exe"]  # more window classes / exe names that are terminals
+learn_interval_minutes = 60       # run `saywell --learn` this often; 0 turns it off
+
+[windows.paste_keys]              # per window class or exe name; wins over the two above
+"mintty.exe" = "Shift+Insert"
+```
+
+Restart the tray after you change the config.
+
+### Hotkey, tray and pasting
+
+- **Win+Alt+E** opens the popup centred on the screen with the mouse. The keys inside the popup are the ones in [the popup](#the-popup) table. Ctrl+Shift+Enter pastes the picked version into the window you came from.
+- If another program already uses the hotkey, the tray says so at start. Pick another `hotkey` and restart. Until then, click the tray icon to open the popup. Text inserted from a popup opened this way only goes to the clipboard.
+- The tray menu has Open Saywell, Learn now, Start at logon and Quit.
+- Paste keys: Windows Terminal gets Ctrl+Shift+V. conhost (the classic console) and mintty (Git Bash, MSYS2) get **Shift+Insert**: conhost types `^V` for Ctrl+Shift+V, and mintty pastes with it only when its Ctrl+Shift shortcuts option is on. Other terminals (ConEmu, WezTerm, Alacritty, ...) get Ctrl+Shift+V, and all other windows get Ctrl+V. Change any of these with `paste`, `terminal_paste` or `[windows.paste_keys]`.
+- Windows will not let the tray paste into a program that runs as administrator (UIPI). The text then stays on the clipboard; paste it yourself.
+
+### Learn
+
+The tray runs `saywell --learn` every hour (`learn_interval_minutes`), and the tray menu has Learn now. A scheduled run that fails only goes to `tray.log`. Without the tray, run `saywell --learn` yourself or from Task Scheduler. `saywell --notes 20` lists your most frequent 知识点.
+
+### Uninstall
+
+```powershell
+saywell-autostart disable          # first, or the Run key points at a missing exe
+# quit the tray from its menu
+uv tool uninstall saywell
+```
+
+This leaves your config and data. Delete `%USERPROFILE%\.config\saywell` and `%USERPROFILE%\.local\share\saywell` to remove them too.
+
+### From a checkout
+
+Without installing, run the same scripts with uv:
+
+```powershell
+python saywell --list
+uv run --no-project --with pyside6-essentials pythonw windows/saywell_tray.py
+uv run --no-project --with pyside6-essentials python windows/saywell_tray.py autostart enable
+```
+
+### Troubleshooting
+
+- **Chinese shows as `?` or mojibake.** saywell reads and writes UTF-8 whatever the console code page is. Windows PowerShell 5.1 sends pipes to programs as ASCII, though, so `"中文" | saywell` arrives as `?`. Run `$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()` first, or use PowerShell 7.
+- **`claude.exe not found`.** Check that `claude --version` works. Then set `$env:SAYWELL_CLAUDE` to the full path of `claude.exe` (for npm: `%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe`). When you test from inside a Claude Code session, remove `CLAUDECODE` from the environment first.
+- **The hotkey does nothing.** Look in `tray.log` for `hotkey ... not registered`. Pick a free `hotkey` and restart the tray.
+- **Nothing is pasted.** If the target runs as administrator, see the UIPI note above. If the terminal gets the wrong keys, add it to `[windows.paste_keys]`. `tray.log` records which keys went to which window.
+- **The tray does not start at logon.** Run `saywell-autostart status` and check that the exe it shows still exists. If you reinstalled uv tools elsewhere, run `saywell-autostart enable` again.
 
 ## License
 
