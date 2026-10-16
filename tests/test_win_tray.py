@@ -302,6 +302,37 @@ class TrayTest(unittest.TestCase):
                 (win32.VK_SHIFT, True, False), (win32.VK_MENU, True, False)]
         self.assertEqual(self.win.sent, [lift, sw.key_events("Ctrl+V")])
 
+    def test_overlapping_pastes_send_once_to_the_newest_target(self):
+        # A second paste while the first still waits for the modifiers: the first must not send
+        # anything (the clipboard holds the second text), the second sends once.
+        tray = self.make_tray()
+        released = time.monotonic() + 0.1
+        self.win.keys_down = lambda vks: [win32.VK_CONTROL] if time.monotonic() < released else []
+        tray.paster.paste(EDITOR)
+        QTest.qWait(50)
+        tray.paster.paste(TERMINAL)
+        wait_for(lambda: self.pasted)
+        QTest.qWait(300)  # let any stale step of the first paste run
+        self.assertEqual(self.pasted, [(True, "Ctrl+Shift+V")])
+        self.assertEqual(self.win.sent, [sw.key_events("Ctrl+Shift+V")])
+        self.assertIsNone(tray.paster.job)
+
+    def test_reopening_the_popup_cancels_a_pending_paste(self):
+        tray = self.make_tray()
+        tray.on_hotkey()
+        self.win.held = [[win32.VK_CONTROL]]  # still holding Ctrl+Shift+Enter's Ctrl
+        tray.popup.input.setPlainText("first")
+        QTest.keyClick(tray.popup.input, Qt.Key_Return, Qt.ControlModifier | Qt.ShiftModifier)
+        QTest.qWait(50)
+        self.assertIsNotNone(tray.paster.job)
+        self.win.foreground = TERMINAL
+        tray.on_hotkey()  # back to the popup before the paste happened
+        self.win.held = [[]]
+        QTest.qWait(1300)  # past the first paste's deadline
+        self.assertEqual(self.win.sent, [])
+        self.assertEqual(self.pasted, [])
+        self.assertEqual(tray.target, TERMINAL)
+
     def test_window_gone(self):
         tray = self.make_tray()
         tray.on_hotkey()
@@ -433,6 +464,56 @@ class LearnerTest(unittest.TestCase):
             wait_for(lambda: results)
         self.assertFalse(results[0][0])
         self.assertIsNone(learner.proc)
+
+    def backend_with_child(self, name):
+        """A backend script that starts a child (as the backend starts claude.exe) which writes a
+        marker file after 2 s, then waits a minute itself. Returns (script, marker, started)."""
+        marker, started = Path(_TMP.name) / f"{name}-marker", Path(_TMP.name) / f"{name}-started"
+        child = "import sys, time; time.sleep(2); open(sys.argv[1], 'w').write('child outlived the kill')"
+        script = (f"import subprocess, sys, time\n"
+                  f"subprocess.Popen([sys.executable, '-c', {child!r}, {str(marker)!r}])\n"
+                  f"open({str(started)!r}, 'w').close()\n"
+                  f"time.sleep(60)\n")
+        return script, marker, started
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process trees")
+    def test_timeout_kills_the_whole_tree(self):
+        script, marker, started = self.backend_with_child("timeout")
+        learner = self.learner(script)
+        learner.run(False)
+        wait_for(started.exists)
+        learner.on_timeout()
+        wait_for(lambda: self.results)
+        self.assertFalse(self.results[0][0])
+        self.assertIsNone(learner.proc)
+        time.sleep(3)
+        self.assertFalse(marker.exists(), "the backend's child kept running after the timeout")
+        self.assertTrue(learner.run(True))  # the slot is free again
+        learner.kill()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process trees")
+    def test_stop_on_quit_kills_the_whole_tree(self):
+        script, marker, started = self.backend_with_child("quit")
+        learner = self.learner(script)
+        learner.run(False)
+        wait_for(started.exists)
+        learner.stop()
+        self.assertFalse(learner.timer.isActive())
+        self.assertIsNone(learner.proc)
+        time.sleep(3)
+        self.assertFalse(marker.exists(), "the backend's child kept running after quit")
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process trees")
+    def test_popup_close_kills_the_backend_tree(self):
+        script, marker, started = self.backend_with_child("popup")
+        popup = tray_mod.popup_qt.Popup([sys.executable, "-c", script])
+        popup.input.setPlainText("draft")
+        popup.analyze()
+        wait_for(started.exists)
+        popup.close()
+        self.assertIsNone(popup.proc)
+        time.sleep(3)
+        self.assertFalse(marker.exists(), "the backend's child kept running after Esc")
 
     def test_one_at_a_time(self):
         learner = self.learner("import time; time.sleep(30)")

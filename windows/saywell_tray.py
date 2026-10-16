@@ -113,7 +113,20 @@ class Learner(QObject):
     def on_timeout(self):
         if self.proc:
             log.warning("learn: no result after %d min, stopping it", LEARN_TIMEOUT_MS // 60_000)
-            self.proc.kill()
+            self.kill()
+
+    def stop(self):
+        """On quit: no more runs, and the one in flight goes with its whole process tree."""
+        self.timer.stop()
+        if self.proc:
+            log.info("learn: stopping the running learn on quit")
+            self.kill()
+
+    def kill(self):
+        # The backend's claude.exe goes too; on_finished then reports the run and frees the slot.
+        proc = self.proc
+        popup_qt.kill_tree(proc)
+        proc.waitForFinished(5000)
 
     def on_finished(self, proc, ok):
         if proc is not self.proc:
@@ -134,7 +147,10 @@ class Learner(QObject):
 
 class Paster(QObject):
     """Puts focus back on a window and sends it the paste keys, once the user lets go of the
-    modifiers of Ctrl+Shift+Enter (else they would join the paste keys)."""
+    modifiers of Ctrl+Shift+Enter (else they would join the paste keys).
+
+    One paste at a time: a new paste() supersedes the one in flight, whose pending steps then
+    stop without sending anything (the clipboard already holds the newer text)."""
 
     done = Signal(bool, str)  # pasted, what happened
     POLL_MS, WAIT_S, SETTLE_MS = 15, 1.0, 40
@@ -142,43 +158,57 @@ class Paster(QObject):
     def __init__(self, win, settings, parent=None):
         super().__init__(parent)
         self.win, self.settings = win, settings
-        self.hwnd = 0
-        self.deadline = 0.0
+        self.job = None  # the paste in flight: {"hwnd", "deadline"}; steps check they still own it
 
     def paste(self, hwnd):
-        self.hwnd = hwnd
-        self.deadline = time.monotonic() + self.WAIT_S
-        QTimer.singleShot(0, self.focus)
+        if self.job:
+            log.info("paste: into %#x superseded by a new one into %#x", self.job["hwnd"], hwnd)
+        job = self.job = {"hwnd": hwnd, "deadline": time.monotonic() + self.WAIT_S}
+        QTimer.singleShot(0, lambda: self.focus(job))
 
-    def focus(self):
-        if not self.win.is_window(self.hwnd):
-            self.done.emit(False, "The window is gone; the text is on the clipboard.")
-        elif not self.win.focus_window(self.hwnd):
-            self.done.emit(False, "Could not switch back to the window; the text is on the clipboard.")
+    def cancel(self):
+        self.job = None
+
+    def finish(self, job, ok, message):
+        self.job = None
+        self.done.emit(ok, message)
+
+    def focus(self, job):
+        if job is not self.job:
+            return
+        if not self.win.is_window(job["hwnd"]):
+            self.finish(job, False, "The window is gone; the text is on the clipboard.")
+        elif not self.win.focus_window(job["hwnd"]):
+            self.finish(job, False, "Could not switch back to the window; the text is on the clipboard.")
         else:
-            self.wait_for_modifiers()
+            self.wait_for_modifiers(job)
 
-    def wait_for_modifiers(self):
+    def wait_for_modifiers(self, job):
+        if job is not self.job:
+            return
         held = self.win.keys_down(win32.MODIFIER_KEYS)
-        if held and time.monotonic() < self.deadline:
-            QTimer.singleShot(self.POLL_MS, self.wait_for_modifiers)
+        if held and time.monotonic() < job["deadline"]:
+            QTimer.singleShot(self.POLL_MS, lambda: self.wait_for_modifiers(job))
             return
         if held:  # still down after a second: lift them, masked so Alt or Win opens no menu
             log.info("paste: lifting held modifiers %s", [hex(vk) for vk in held])
             events = [(win32.VK_MASK, False, False), (win32.VK_MASK, True, False)]
             self.win.send_keys(events + [(vk, True, False) for vk in held])
-        QTimer.singleShot(self.SETTLE_MS, self.send)
+        QTimer.singleShot(self.SETTLE_MS, lambda: self.send(job))
 
-    def send(self):
-        if self.win.foreground_window() != self.hwnd:
-            self.done.emit(False, "Focus moved to another window; the text is on the clipboard.")
+    def send(self, job):
+        if job is not self.job:
             return
-        spec = sw.paste_keys(self.win, self.hwnd, self.settings)
+        hwnd = job["hwnd"]
+        if self.win.foreground_window() != hwnd:
+            self.finish(job, False, "Focus moved to another window; the text is on the clipboard.")
+            return
+        spec = sw.paste_keys(self.win, hwnd, self.settings)
         events = sw.key_events(spec)
         if self.win.send_keys(events) != len(events):
-            self.done.emit(False, f"Sending {spec} failed; the text is on the clipboard.")
+            self.finish(job, False, f"Sending {spec} failed; the text is on the clipboard.")
         else:
-            self.done.emit(True, spec)
+            self.finish(job, True, spec)
 
 
 class Tray(QObject):
@@ -240,6 +270,8 @@ class Tray(QObject):
             self.win.unregister_hotkey(HOTKEY_ID)
             self.hotkey_ok = False
         QApplication.instance().removeNativeEventFilter(self.filter)
+        self.paster.cancel()
+        self.learner.stop()
         if self.popup:
             self.popup.close()
         self.icon.hide()
@@ -281,6 +313,8 @@ class Tray(QObject):
             self.open_from_menu()
 
     def show_popup(self):
+        # A paste still waiting for the modifiers would find the popup in front, not its window.
+        self.paster.cancel()
         if not self.popup_open():
             if self.popup is not None:
                 self.popup.deleteLater()

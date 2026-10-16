@@ -47,6 +47,7 @@ import html
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -141,6 +142,18 @@ def backend_command(path=None):
     if Path(path).suffix.lower() in (".exe", ".cmd", ".bat", ".com"):
         return [path]
     return [sys.executable, path]
+
+
+def kill_tree(proc):
+    """Kill a QProcess and, on Windows, everything it started: killing the backend alone would
+    leave its claude.exe running (Windows does not end children with their parent)."""
+    if proc.state() == QProcess.NotRunning:
+        return
+    pid = proc.processId()
+    if sys.platform == "win32" and pid:
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
+    proc.kill()
 
 
 def label(text="", css="", rich=False, wrap=True, selectable=False):
@@ -450,14 +463,14 @@ class Popup(QWidget):
     def stop(self):
         if self.proc:
             proc, self.proc = self.proc, None
-            proc.kill()
+            kill_tree(proc)
             proc.waitForFinished(2000)
 
     def stop_asks(self):
         # Take the list first: waitForFinished runs on_answer, which must find nothing to update.
         asks, self.asks = self.asks, []
         for proc in asks:
-            proc.kill()
+            kill_tree(proc)
             proc.waitForFinished(2000)
 
     def process(self, args):
