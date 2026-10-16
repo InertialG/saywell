@@ -221,6 +221,36 @@ class PopupTest(unittest.TestCase):
         self.assertEqual(self.popup.history, [])
         self.assertNotIn("why?", texts(self.popup.right_scroll))
 
+    def slow_asks(self, *questions):
+        """Start follow-ups whose answers take a minute; returns their processes once all are running."""
+        os.environ["FAKE_SAYWELL_ASK_DELAY"] = "60"
+        for q in questions:
+            self.popup.ask.setText(q)
+            QTest.keyClick(self.popup.ask, Qt.Key_Return)
+        procs = list(self.popup.asks)
+        self.assertEqual(len(procs), len(questions))
+        wait_for(lambda: all(p.state() == p.ProcessState.Running for p in procs))
+        return procs
+
+    def test_close_stops_every_follow_up(self):
+        self.check()
+        procs = self.slow_asks("why?", "too formal?")
+        self.popup.close()
+        self.assertEqual([p.state() for p in procs], [procs[0].ProcessState.NotRunning] * 2)
+        self.assertEqual(self.popup.asks, [])
+        self.assertEqual(self.answers, [])
+
+    def test_new_check_stops_pending_follow_ups(self):
+        self.check()
+        procs = self.slow_asks("why?", "too formal?")
+        self.check()
+        self.assertEqual([p.state() for p in procs], [procs[0].ProcessState.NotRunning] * 2)
+        self.assertEqual(self.popup.asks, [])
+        self.assertEqual(self.popup.history, [])
+        QApplication.processEvents()
+        self.assertEqual(self.answers, [])  # no stale answered signal
+        self.assertNotIn("why?", texts(self.popup.right_scroll))
+
     # ---- keys -------------------------------------------------------------
 
     def test_pick_keys(self):

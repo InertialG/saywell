@@ -453,6 +453,13 @@ class Popup(QWidget):
             proc.kill()
             proc.waitForFinished(2000)
 
+    def stop_asks(self):
+        # Take the list first: waitForFinished runs on_answer, which must find nothing to update.
+        asks, self.asks = self.asks, []
+        for proc in asks:
+            proc.kill()
+            proc.waitForFinished(2000)
+
     def process(self, args):
         """A backend process with UTF-8 IO on every platform (Windows defaults to the ANSI code page)."""
         proc = QProcess(self)
@@ -470,6 +477,7 @@ class Popup(QWidget):
             self.show_toast("Type a message first")
             return
         self.stop()
+        self.stop_asks()  # their answers belong to the chat cleared below
         self.analysis = None
         self.history = []
         clear(self.chat)
@@ -708,10 +716,7 @@ class Popup(QWidget):
 
     def closeEvent(self, event):
         self.stop()
-        for proc in self.asks:
-            proc.kill()
-            proc.waitForFinished(2000)
-        self.asks = []
+        self.stop_asks()
         QApplication.instance().removeEventFilter(self.keys)
         super().closeEvent(event)
 

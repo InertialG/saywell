@@ -2,6 +2,7 @@
 """A stand-in for `saywell --json --stream` and `saywell --ask` with canned replies, for the popup tests.
 
 $FAKE_SAYWELL_SCENARIO picks the reply: ok (no meaning flags), flags, tone, fail.
+$FAKE_SAYWELL_ASK_DELAY delays the --ask answer by that many seconds.
 $FAKE_SAYWELL_LOG, if set, gets one JSON line per call with argv and stdin.
 """
 
@@ -33,6 +34,7 @@ def main():
     if "--ask" in sys.argv:
         question = sys.argv[sys.argv.index("--ask") + 1]
         context = json.loads(stdin)
+        time.sleep(float(os.environ.get("FAKE_SAYWELL_ASK_DELAY", "0")))
         print(f"**{question}**: 用 `interrupt` 更自然。\n\n(history {len(context.get('history', []))})")
         return
     text = stdin.strip()
