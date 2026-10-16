@@ -276,7 +276,14 @@ def claude_cli(provider, system, prompt, on_text=None):
             out, err = proc.communicate(prompt.encode("utf-8"), timeout=timeout)
         except subprocess.TimeoutExpired:
             kill_tree(proc)
-            proc.communicate()
+            # Don't read the pipes to EOF: on Linux a grandchild of claude may still hold them.
+            # On Windows the whole tree is gone; communicate() joins its reader threads.
+            if sys.platform == "win32":
+                proc.communicate()
+            else:
+                proc.wait()
+                proc.stdout.close()
+                proc.stderr.close()
             raise RuntimeError("claude timed out") from None
         out, err = out.decode("utf-8", errors="replace"), err.decode("utf-8", errors="replace")
         try:

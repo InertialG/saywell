@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -372,6 +373,17 @@ class TestTimeout(SaywellCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("saywell [slow]: claude timed out", proc.err)
         self.assertLess(proc.elapsed, 15)
+
+    def test_timeout_while_grandchild_holds_pipes(self):
+        """A grandchild of claude that inherited stdout/stderr must not delay the timeout."""
+        pid_file = self.tmp / "child.pid"
+        proc = self.run_saywell("-p", "slow", env={"FAKE_CLAUDE_SLEEP": "30",
+                                                   "FAKE_CLAUDE_CHILD": str(pid_file)})
+        if sys.platform != "win32":  # Linux only stops claude itself; clean up after it
+            self.addCleanup(lambda: os.kill(int(pid_file.read_text()), signal.SIGKILL))
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("saywell [slow]: claude timed out", proc.err)
+        self.assertLess(proc.elapsed, 15)  # the grandchild sleeps 120 s
 
     def test_api_timeout(self):
         proc = self.run_saywell("-p", "api-slow")
