@@ -163,6 +163,30 @@ uv run --no-project --with pyside6-essentials pythonw windows/saywell_tray.py
 uv run --no-project --with pyside6-essentials python windows/saywell_tray.py autostart enable
 ```
 
+### End-to-end test (端到端测试)
+
+One command, from the repo root, in cmd, PowerShell or by double-click:
+
+```powershell
+.\scripts\windows\e2e.cmd                        # Windows PowerShell 5.1
+pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\windows\e2e.ps1   # the same under PowerShell 7
+```
+
+It checks the environment (uv, Python 3.11+, PowerShell, `claude.exe` for the claude provider, a running tray), runs the unit tests, installs the checkout with `uv tool install`, runs `saywell`, `saywell --json`, `--learn` and `--usage` on a real provider, then starts the installed `saywell-tray.exe` and prints a checklist for testing the hotkey, the paste and the tray menu by hand. Press Enter when done; it stops only the tray it started, uninstalls, and prints PASS / FAIL / SKIP for each step. The exit code is 0 when nothing failed, 1 when a step failed, and 2 when the config needs your API key first.
+
+**API key.** The first run copies `scripts\windows\e2e.config.example.toml` to `.e2e\config\saywell\config.toml`, opens it in Notepad and stops. Paste your key into `api_key` of `[providers.api]` (and change `base_url` and `model` if you do not use DeepSeek), save, and run again. The script stops the same way while the default provider's key is the placeholder or empty. It never prints the key or writes it to the logs. Without a key, use your Claude subscription: `-Provider claude`.
+
+| Parameter | |
+|---|---|
+| `-Provider NAME` | use this provider for this run (e.g. `claude`) and skip the key check of the default |
+| `-SkipTests` | skip the unit tests |
+| `-SkipTray` | skip the tray step |
+| `-NonInteractive` | never wait for input or open Notepad; implies `-SkipTray` (for CI and agents) |
+| `-Keep` | keep the sandbox install afterwards, to test the tray again by hand |
+| `-Clean` | delete the whole sandbox, including the config with your key, and exit |
+
+**Sandbox.** Everything lives in `.e2e\` in the repo (ignored by git): `config\` (`XDG_CONFIG_HOME`), `data\` (`XDG_DATA_HOME`, emptied at each run), `cache\`, `uv\tools` and `uv\bin` (`UV_TOOL_DIR`, `UV_TOOL_BIN_DIR`), and `logs\`, one full log per run. The variables are set only inside the script and restored at its end. The sandbox tray uses its own single-instance name, but there is only one Win+Alt+E: quit your real tray before you test the hotkey. The last step checks that `%USERPROFILE%\.config\saywell`, `uv tool list` and the `HKCU\...\Run` values are the same as before the run.
+
 ### Troubleshooting
 
 - **Chinese shows as `?` or mojibake.** saywell reads and writes UTF-8 whatever the console code page is. Windows PowerShell 5.1 sends pipes to programs as ASCII, though, so `"中文" | saywell` arrives as `?`. Run `$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new()` first, or use PowerShell 7.

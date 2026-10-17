@@ -1,0 +1,32 @@
+# saywell 端到端测试（scripts/windows/e2e.ps1）的沙箱配置模板。
+#
+# e2e.ps1 第一次运行时会把本文件复制到 .e2e\config\saywell\config.toml，之后只读那份副本。
+# 请编辑副本，不要在本模板里填 key：模板会提交到 git，副本在 .e2e\ 下，已被 .gitignore 忽略。
+# e2e.ps1 不会把 key 打印到控制台，也不会写进 .e2e\logs\ 的日志。
+#
+# 字段和正式配置（config.example.toml）一样，后端读法也一样。
+
+# default：默认使用的 provider，填下面某个 [providers.<名字>] 的名字。
+# 只想临时换一个 provider 时不用改这里，运行时加参数即可：.\scripts\windows\e2e.cmd -Provider claude
+default = "api"
+
+# OpenAI 兼容的 API provider。DeepSeek、OpenRouter、Groq、硅基流动，或自建的 vLLM / llama.cpp 都可以。
+[providers.api]
+# base_url：接口根地址，一般以 /v1 结尾。saywell 会在后面拼上 /chat/completions。
+#   例：https://api.deepseek.com/v1、https://openrouter.ai/api/v1、http://127.0.0.1:8080/v1
+base_url = "https://api.deepseek.com/v1"
+# model：模型名，按服务商文档填写。例：deepseek-chat、google/gemma-4-26b-a4b-it:free
+model = "deepseek-chat"
+# api_key：你的 API key，整串粘贴到引号里，替换 PASTE_YOUR_API_KEY_HERE。
+#   本地不需要 key 的服务也请随便填一个非空值（例如 "none"），否则 e2e.ps1 会以为还没填。
+api_key = "PASTE_YOUR_API_KEY_HERE"
+# timeout：单次请求的超时秒数。
+timeout = 60
+
+# 备选：Claude Code 订阅（claude -p --model haiku），不需要 API key，但需要已安装并登录 Claude Code。
+# 用法：运行时加 -Provider claude，或把上面的 default 改成 "claude"。
+[providers.claude]
+type = "claude-cli"
+model = "haiku"
+# timeout：单次调用的超时秒数（--learn 一次处理多条消息，给宽一些）。
+timeout = 120

@@ -1,2 +1,4 @@
 __pycache__/
 *.bak
+# scripts/windows/e2e.ps1 sandbox: config (with your API key), data, uv tools, logs
+.e2e/
